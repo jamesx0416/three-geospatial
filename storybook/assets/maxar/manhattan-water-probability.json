@@ -1,0 +1,18 @@
+{
+  "source": {
+    "name": "utm18n_46_05_1_1",
+    "url": "https://arcticdata.io/data/10.18739/A2610VT7V/earthdem/earthdem_03_conus/utm18n_46_05_1_1/output/utm18n_46_05_1_1_prob_v1.0.tif"
+  },
+  "rectangle": {
+    "west": -74.08,
+    "south": 40.66,
+    "east": -73.88,
+    "north": 40.84
+  },
+  "width": 1024,
+  "height": 1024,
+  "file": "storybook/assets/maxar/manhattan-water-probability.png",
+  "valid": 712882,
+  "water": 712882,
+  "encoding": "255 is no-data; all valid source pixels are treated as water-mask coverage for culling"
+}
