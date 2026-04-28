@@ -5,7 +5,13 @@ import {
   EffectMaterial,
   type EffectComposer as EffectComposerImpl
 } from 'postprocessing'
-import { Fragment, useLayoutEffect, useRef, type FC } from 'react'
+import {
+  Fragment,
+  useLayoutEffect,
+  useRef,
+  type FC,
+  type ReactNode
+} from 'react'
 
 import {
   AerialPerspective,
@@ -44,6 +50,7 @@ interface SceneProps extends LocalDateControlsParams {
   heading?: number
   pitch?: number
   distance?: number
+  globeChildren?: ReactNode
 }
 
 const Scene: FC<SceneProps> = ({
@@ -53,6 +60,7 @@ const Scene: FC<SceneProps> = ({
   heading = 180,
   pitch = -30,
   distance = 4500,
+  globeChildren,
   ...localDate
 }) => {
   const { toneMappingMode } = useToneMappingControls({ exposure })
@@ -138,6 +146,7 @@ const Scene: FC<SceneProps> = ({
       <Sky />
       <Stars data='atmosphere/stars.bin' />
       <Globe>
+        {globeChildren}
         <GlobeControls enableDamping />
       </Globe>
       <EffectComposer
