@@ -5,7 +5,15 @@ import {
   type WaterOccurrenceTileClassifier
 } from '@takram/three-geospatial'
 import type { Tile, TilesRenderer } from '3d-tiles-renderer'
-import { Box3, Matrix4, Sphere, Vector3 } from 'three'
+import {
+  Box3,
+  Color,
+  Matrix4,
+  Sphere,
+  Vector3,
+  type Material,
+  type Object3D
+} from 'three'
 
 type RegionArray = readonly [number, number, number, number, ...number[]]
 
@@ -47,6 +55,7 @@ type TileWithRegion = Tile & {
   }
   readonly engineData?: {
     readonly boundingVolume?: TileBoundingVolumeLike | null
+    readonly scene?: Object3D | null
   }
 }
 
@@ -58,10 +67,22 @@ interface DebugStats {
   classified: number
   missingRectangles: number
   viewChecks: number
-  culled: number
+  colored: number
   maxWaterFraction: number
   maxValidFraction: number
   classes: Record<WaterOccurrenceClass, number>
+}
+
+type Object3DWithMaterial = Object3D & {
+  material?: Material | Material[]
+}
+
+type MaterialWithColor = Material & {
+  color?: Color
+  emissive?: Color
+  emissiveIntensity?: number
+  map?: unknown
+  toneMapped?: boolean
 }
 
 const boxScratch = /*#__PURE__*/ new Box3()
@@ -70,12 +91,16 @@ const sphereScratch = /*#__PURE__*/ new Sphere()
 const vectorScratch = /*#__PURE__*/ new Vector3()
 const cartographicScratch: CartographicLike = { lat: 0, lon: 0, height: 0 }
 const RADIANS_TO_DEGREES = 180 / Math.PI
+const TILE_COLOR = /*#__PURE__*/ new Color(0xff0000)
 
 export interface WaterOccurrenceTilesPluginOptions {
   readonly classifier: WaterOccurrenceTileClassifier
+  readonly coloredClasses?: readonly WaterOccurrenceClass[]
   readonly culledClasses?: readonly WaterOccurrenceClass[]
   readonly minimumWaterFraction?: number
   readonly minimumValidFraction?: number
+  readonly maximumColorRectangleWidth?: number
+  readonly maximumColorRectangleHeight?: number
   readonly debug?: boolean
   readonly debugLogLevel?: 'debug' | 'info'
   readonly maxDebugLogs?: number
@@ -88,13 +113,15 @@ export interface WaterOccurrenceTilesPluginOptions {
 export class WaterOccurrenceTilesPlugin {
   readonly name = 'WATER_OCCURRENCE_TILES_PLUGIN'
   readonly classifier: WaterOccurrenceTileClassifier
-  readonly culledClasses: ReadonlySet<WaterOccurrenceClass>
+  readonly coloredClasses: ReadonlySet<WaterOccurrenceClass>
   readonly onTileClassified?: (
     tile: Tile,
     classification: WaterOccurrenceClassification
   ) => void
   readonly minimumWaterFraction?: number
   readonly minimumValidFraction: number
+  readonly maximumColorRectangleWidth: number
+  readonly maximumColorRectangleHeight: number
   readonly debug: boolean
   readonly debugLogLevel: 'debug' | 'info'
   readonly maxDebugLogs: number
@@ -105,14 +132,17 @@ export class WaterOccurrenceTilesPlugin {
     Tile,
     WaterOccurrenceClassification | null
   >()
+  private readonly classificationRectangles = new WeakMap<Tile, Rectangle>()
   private readonly rectangle = new Rectangle()
+  private readonly coloredTiles = new WeakSet<Tile>()
   private debugLogCount = 0
-  private cullDebugLogCount = 0
+  private colorSetLogCount = 0
+  private colorPendingLogCount = 0
   private readonly debugStats: DebugStats = {
     classified: 0,
     missingRectangles: 0,
     viewChecks: 0,
-    culled: 0,
+    colored: 0,
     maxWaterFraction: 0,
     maxValidFraction: 0,
     classes: {
@@ -126,18 +156,25 @@ export class WaterOccurrenceTilesPlugin {
   constructor(options: WaterOccurrenceTilesPluginOptions) {
     const {
       classifier,
-      culledClasses = ['water'],
+      coloredClasses,
+      culledClasses,
       minimumWaterFraction,
       minimumValidFraction = 1,
+      maximumColorRectangleWidth = Infinity,
+      maximumColorRectangleHeight = Infinity,
       debug = false,
       debugLogLevel = 'debug',
       maxDebugLogs = 200,
       onTileClassified
     } = options
     this.classifier = classifier
-    this.culledClasses = new Set(culledClasses)
+    this.coloredClasses = new Set(
+      coloredClasses ?? culledClasses ?? ['water']
+    )
     this.minimumWaterFraction = minimumWaterFraction
     this.minimumValidFraction = minimumValidFraction
+    this.maximumColorRectangleWidth = maximumColorRectangleWidth
+    this.maximumColorRectangleHeight = maximumColorRectangleHeight
     this.debug = debug
     this.debugLogLevel = debugLogLevel
     this.maxDebugLogs = maxDebugLogs
@@ -148,9 +185,13 @@ export class WaterOccurrenceTilesPlugin {
   init(tiles: TilesRenderer): void {
     this.tiles = tiles
     this.logDebug('init', {
-      culledClasses: [...this.culledClasses],
+      coloredClasses: [...this.coloredClasses],
       minimumWaterFraction: this.minimumWaterFraction,
       minimumValidFraction: this.minimumValidFraction,
+      maximumColorRectangleDegrees: {
+        width: this.maximumColorRectangleWidth * RADIANS_TO_DEGREES,
+        height: this.maximumColorRectangleHeight * RADIANS_TO_DEGREES
+      },
       debugLogLevel: this.debugLogLevel
     })
     tiles.dispatchEvent({ type: 'needs-update' })
@@ -162,9 +203,22 @@ export class WaterOccurrenceTilesPlugin {
   }
 
   // Plugin method
+  processTileModel(scene: Object3D, tile: Tile): void {
+    this.applyTileColor(tile, scene)
+  }
+
+  // Plugin method
+  setTileVisible(tile: Tile, visible: boolean): void {
+    if (visible) {
+      this.applyTileColor(tile)
+    }
+  }
+
+  // Plugin method
   calculateTileViewError(tile: Tile, target: TileViewErrorTarget): boolean {
+    void target
     const classification = this.classifyTile(tile)
-    const cull = classification != null && this.shouldCull(classification)
+    const shouldColor = classification != null && this.shouldColor(classification)
     const validFraction =
       classification != null && classification.samples > 0
         ? classification.validSamples / classification.samples
@@ -180,31 +234,18 @@ export class WaterOccurrenceTilesPlugin {
         ? (classification?.waterFraction ?? 0)
         : 0
     )
-    if (cull) {
-      this.debugStats.culled++
-      this.logCullDebug({
-        class: classification.class,
-        waterFraction: classification.waterFraction,
-        validFraction,
-        summary: this.getDebugSummary()
-      })
+    if (shouldColor) {
+      this.applyTileColor(tile, undefined, classification)
     }
     this.logDebug('view-error', {
       hasClassification: classification != null,
       class: classification?.class,
       waterFraction: classification?.waterFraction,
       validFraction,
-      cull,
+      shouldColor,
       summary: this.getDebugSummary()
     })
-    if (classification == null || !cull) {
-      return false
-    }
-
-    target.inView = false
-    target.error = 0
-    target.distance = Infinity
-    return true
+    return false
   }
 
   getClassification(
@@ -245,6 +286,7 @@ export class WaterOccurrenceTilesPlugin {
 
     const classification = this.classifier.classifyRectangle(rectangle)
     this.classifications.set(tile, classification)
+    this.classificationRectangles.set(tile, rectangle.clone())
     this.debugStats.classified++
     this.debugStats.classes[classification.class]++
 
@@ -270,8 +312,8 @@ export class WaterOccurrenceTilesPlugin {
     return classification
   }
 
-  private shouldCull(classification: WaterOccurrenceClassification): boolean {
-    if (this.culledClasses.has(classification.class)) {
+  private shouldColor(classification: WaterOccurrenceClassification): boolean {
+    if (this.coloredClasses.has(classification.class)) {
       return true
     }
     const { minimumWaterFraction } = this
@@ -284,6 +326,109 @@ export class WaterOccurrenceTilesPlugin {
     )
   }
 
+  private applyTileColor(
+    tile: Tile,
+    scene = (tile as TileWithRegion).engineData?.scene,
+    classification = this.classifyTile(tile)
+  ): void {
+    if (this.coloredTiles.has(tile)) {
+      return
+    }
+    if (classification == null || !this.shouldColor(classification)) {
+      return
+    }
+    const rectangle = this.getClassificationRectangle(tile)
+    if (rectangle == null || !this.shouldColorRectangle(rectangle)) {
+      this.logTileColor('tile colour skipped', {
+        reason: rectangle == null ? 'missing-rectangle' : 'large-footprint',
+        class: classification.class,
+        waterFraction: classification.waterFraction,
+        validFraction: getValidFraction(classification),
+        rectangleDegrees:
+          rectangle != null ? rectangleToDegrees(rectangle) : undefined,
+        summary: this.getDebugSummary()
+      })
+      return
+    }
+    if (scene == null) {
+      this.logTileColor('tile colour pending', {
+        class: classification.class,
+        waterFraction: classification.waterFraction,
+        validFraction: getValidFraction(classification),
+        rectangleDegrees: rectangleToDegrees(rectangle),
+        summary: this.getDebugSummary()
+      })
+      return
+    }
+
+    let materialCount = 0
+    scene.traverse(object => {
+      const objectWithMaterial = object as Object3DWithMaterial
+      const { material } = objectWithMaterial
+      if (material == null) {
+        return
+      }
+
+      const materials = Array.isArray(material) ? material : [material]
+      const coloredMaterials = materials.map(material => {
+        const coloredMaterial = material.clone() as MaterialWithColor
+        if (coloredMaterial.color != null) {
+          coloredMaterial.color.copy(TILE_COLOR)
+        }
+        if ('map' in coloredMaterial) {
+          coloredMaterial.map = null
+        }
+        if (coloredMaterial.emissive != null) {
+          coloredMaterial.emissive.copy(TILE_COLOR)
+        }
+        if (coloredMaterial.emissiveIntensity != null) {
+          coloredMaterial.emissiveIntensity = 1
+        }
+        if (coloredMaterial.toneMapped != null) {
+          coloredMaterial.toneMapped = false
+        }
+        coloredMaterial.needsUpdate = true
+        materialCount++
+        return coloredMaterial
+      })
+      objectWithMaterial.material = Array.isArray(material)
+        ? coloredMaterials
+        : coloredMaterials[0]
+    })
+
+    this.coloredTiles.add(tile)
+    this.debugStats.colored++
+    this.logColorDebug({
+      class: classification.class,
+      waterFraction: classification.waterFraction,
+      validFraction: getValidFraction(classification),
+      rectangleDegrees: rectangleToDegrees(rectangle),
+      materialCount,
+      summary: this.getDebugSummary()
+    })
+  }
+
+  private getClassificationRectangle(tile: Tile): Rectangle | undefined {
+    const cached = this.classificationRectangles.get(tile)
+    if (cached != null) {
+      return cached
+    }
+    const rectangle = getTileRectangle(tile, this.rectangle, this.tiles)
+    if (rectangle == null) {
+      return undefined
+    }
+    const clone = rectangle.clone()
+    this.classificationRectangles.set(tile, clone)
+    return clone
+  }
+
+  private shouldColorRectangle(rectangle: Rectangle): boolean {
+    return (
+      rectangle.width <= this.maximumColorRectangleWidth &&
+      rectangle.height <= this.maximumColorRectangleHeight
+    )
+  }
+
   private logDebug(message: string, data?: unknown): void {
     if (!this.debug || this.debugLogCount >= this.maxDebugLogs) {
       return
@@ -292,12 +437,28 @@ export class WaterOccurrenceTilesPlugin {
     this.writeDebugLog(`[WaterOccurrenceTilesPlugin] ${message}`, data)
   }
 
-  private logCullDebug(data: unknown): void {
-    if (!this.debug || this.cullDebugLogCount >= 20) {
+  private logColorDebug(data: unknown): void {
+    if (!this.debug || this.colorSetLogCount >= 100) {
       return
     }
-    this.cullDebugLogCount++
-    this.writeDebugLog('[WaterOccurrenceTilesPlugin] cull', data)
+    this.colorSetLogCount++
+    console.log('[WaterOccurrenceTilesPlugin] tile colour set', data)
+  }
+
+  private logColorPending(message: string, data: unknown): void {
+    if (!this.debug || this.colorPendingLogCount >= 100) {
+      return
+    }
+    this.colorPendingLogCount++
+    console.log(`[WaterOccurrenceTilesPlugin] ${message}`, data)
+  }
+
+  private logTileColor(message: string, data: unknown): void {
+    if (message === 'tile colour set') {
+      this.logColorDebug(data)
+      return
+    }
+    this.logColorPending(message, data)
   }
 
   private getDebugSummary(): DebugStats {
@@ -314,6 +475,14 @@ export class WaterOccurrenceTilesPlugin {
       console.debug(message, data)
     }
   }
+}
+
+function getValidFraction(
+  classification: WaterOccurrenceClassification
+): number | undefined {
+  return classification.samples > 0
+    ? classification.validSamples / classification.samples
+    : undefined
 }
 
 function rectangleToDegrees(rectangle: Rectangle): Rectangle {

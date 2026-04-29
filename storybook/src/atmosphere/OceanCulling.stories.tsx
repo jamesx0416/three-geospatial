@@ -54,6 +54,8 @@ export const Manhattan: StoryFn = () => {
               debug: true,
               debugLogLevel: 'info',
               maxDebugLogs: 500,
+              maximumColorRectangleHeight: radians(0.01),
+              maximumColorRectangleWidth: radians(0.01),
               minimumValidFraction: 0.95,
               minimumWaterFraction: 1
             }}
