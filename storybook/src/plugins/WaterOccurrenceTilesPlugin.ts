@@ -101,6 +101,7 @@ export interface WaterOccurrenceTilesPluginOptions {
   readonly minimumValidFraction?: number
   readonly maximumColorRectangleWidth?: number
   readonly maximumColorRectangleHeight?: number
+  readonly colorSampleGridSize?: number
   readonly debug?: boolean
   readonly debugLogLevel?: 'debug' | 'info'
   readonly maxDebugLogs?: number
@@ -122,6 +123,7 @@ export class WaterOccurrenceTilesPlugin {
   readonly minimumValidFraction: number
   readonly maximumColorRectangleWidth: number
   readonly maximumColorRectangleHeight: number
+  readonly colorSampleGridSize: number
   readonly debug: boolean
   readonly debugLogLevel: 'debug' | 'info'
   readonly maxDebugLogs: number
@@ -162,6 +164,7 @@ export class WaterOccurrenceTilesPlugin {
       minimumValidFraction = 1,
       maximumColorRectangleWidth = Infinity,
       maximumColorRectangleHeight = Infinity,
+      colorSampleGridSize = 64,
       debug = false,
       debugLogLevel = 'debug',
       maxDebugLogs = 200,
@@ -175,6 +178,7 @@ export class WaterOccurrenceTilesPlugin {
     this.minimumValidFraction = minimumValidFraction
     this.maximumColorRectangleWidth = maximumColorRectangleWidth
     this.maximumColorRectangleHeight = maximumColorRectangleHeight
+    this.colorSampleGridSize = colorSampleGridSize
     this.debug = debug
     this.debugLogLevel = debugLogLevel
     this.maxDebugLogs = maxDebugLogs
@@ -192,6 +196,7 @@ export class WaterOccurrenceTilesPlugin {
         width: this.maximumColorRectangleWidth * RADIANS_TO_DEGREES,
         height: this.maximumColorRectangleHeight * RADIANS_TO_DEGREES
       },
+      colorSampleGridSize: this.colorSampleGridSize,
       debugLogLevel: this.debugLogLevel
     })
     tiles.dispatchEvent({ type: 'needs-update' })
@@ -350,11 +355,26 @@ export class WaterOccurrenceTilesPlugin {
       })
       return
     }
+    const colorClassification = this.classifier.classifyRectangle(rectangle, {
+      fallbackSampleGridSize: this.colorSampleGridSize,
+      maxScanSamples: this.colorSampleGridSize * this.colorSampleGridSize
+    })
+    if (!this.shouldColorStrictly(colorClassification)) {
+      this.logTileColor('tile colour skipped', {
+        reason: 'not-strict-water',
+        class: colorClassification.class,
+        waterFraction: colorClassification.waterFraction,
+        validFraction: getValidFraction(colorClassification),
+        rectangleDegrees: rectangleToDegrees(rectangle),
+        summary: this.getDebugSummary()
+      })
+      return
+    }
     if (scene == null) {
       this.logTileColor('tile colour pending', {
-        class: classification.class,
-        waterFraction: classification.waterFraction,
-        validFraction: getValidFraction(classification),
+        class: colorClassification.class,
+        waterFraction: colorClassification.waterFraction,
+        validFraction: getValidFraction(colorClassification),
         rectangleDegrees: rectangleToDegrees(rectangle),
         summary: this.getDebugSummary()
       })
@@ -399,9 +419,9 @@ export class WaterOccurrenceTilesPlugin {
     this.coloredTiles.add(tile)
     this.debugStats.colored++
     this.logColorDebug({
-      class: classification.class,
-      waterFraction: classification.waterFraction,
-      validFraction: getValidFraction(classification),
+      class: colorClassification.class,
+      waterFraction: colorClassification.waterFraction,
+      validFraction: getValidFraction(colorClassification),
       rectangleDegrees: rectangleToDegrees(rectangle),
       materialCount,
       summary: this.getDebugSummary()
@@ -426,6 +446,17 @@ export class WaterOccurrenceTilesPlugin {
     return (
       rectangle.width <= this.maximumColorRectangleWidth &&
       rectangle.height <= this.maximumColorRectangleHeight
+    )
+  }
+
+  private shouldColorStrictly(
+    classification: WaterOccurrenceClassification
+  ): boolean {
+    return (
+      this.coloredClasses.has(classification.class) &&
+      classification.samples > 0 &&
+      classification.validSamples === classification.samples &&
+      classification.waterFraction === 1
     )
   }
 
