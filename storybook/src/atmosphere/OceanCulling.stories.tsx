@@ -1,12 +1,17 @@
 import type { Meta, StoryFn } from '@storybook/react-vite'
 import { TilesPlugin } from '3d-tiles-renderer/r3f'
-import { useEffect, useMemo, useState } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type ReactElement
+} from 'react'
 import {
   BufferGeometry,
   CanvasTexture,
   DoubleSide,
   Float32BufferAttribute,
-  LinearFilter,
+  NearestFilter,
   Vector3
 } from 'three'
 
@@ -29,10 +34,11 @@ const MAXAR_WATER_PROBABILITY_RECTANGLE = new Rectangle(
   radians(-73.88),
   radians(40.84)
 )
+const MAXAR_LAND_THRESHOLD = 0
+const MAXAR_WATER_THRESHOLD = 90
 const MAXAR_OVERLAY_ALTITUDE = 80
-const MAXAR_OVERLAY_ALPHA = 180
+const MAXAR_OVERLAY_ALPHA = 220
 const MAXAR_OVERLAY_SEGMENTS = 96
-const MAXAR_OVERLAY_WATER_THRESHOLD = 50
 
 let maxarWaterClassifierPromise:
   | Promise<WaterOccurrenceTileClassifier>
@@ -84,7 +90,7 @@ export const Manhattan: StoryFn = () => {
   )
 }
 
-function MaxarClassificationOverlay(): JSX.Element | null {
+function MaxarClassificationOverlay(): ReactElement | null {
   const texture = useMaxarClassificationOverlayTexture()
   const geometry = useMemo(
     () =>
@@ -112,7 +118,7 @@ function MaxarClassificationOverlay(): JSX.Element | null {
       <meshBasicMaterial
         map={texture}
         transparent
-        depthTest={false}
+        depthTest
         depthWrite={false}
         side={DoubleSide}
         toneMapped={false}
@@ -173,8 +179,8 @@ function loadMaxarManhattanWaterClassifier(): Promise<WaterOccurrenceTileClassif
   ).then(
     raster =>
       new WaterOccurrenceTileClassifier(raster, {
-        landThreshold: -1,
-        waterThreshold: 0
+        landThreshold: MAXAR_LAND_THRESHOLD,
+        waterThreshold: MAXAR_WATER_THRESHOLD
       })
   )
   return maxarWaterClassifierPromise
@@ -218,10 +224,10 @@ async function loadMaxarClassificationOverlayTexture(
 ): Promise<CanvasTexture> {
   maxarOverlayTexturePromise ??= loadMaxarOverlayCanvas(path).then(canvas => {
     const texture = new CanvasTexture(canvas)
-    texture.flipY = false
+    texture.flipY = true
     texture.generateMipmaps = false
-    texture.minFilter = LinearFilter
-    texture.magFilter = LinearFilter
+    texture.minFilter = NearestFilter
+    texture.magFilter = NearestFilter
     texture.needsUpdate = true
     return texture
   })
@@ -251,18 +257,13 @@ async function loadMaxarOverlayCanvas(path: string): Promise<HTMLCanvasElement> 
   const data = image.data
   for (let i = 0; i < data.length; i += 4) {
     const value = data[i]
-    if (value === 255) {
-      data[i + 3] = 0
-    } else if (value >= MAXAR_OVERLAY_WATER_THRESHOLD) {
+    if (value !== 255 && value >= MAXAR_WATER_THRESHOLD) {
       data[i] = 255
       data[i + 1] = 0
       data[i + 2] = 0
       data[i + 3] = MAXAR_OVERLAY_ALPHA
     } else {
-      data[i] = 255
-      data[i + 1] = 230
-      data[i + 2] = 0
-      data[i + 3] = MAXAR_OVERLAY_ALPHA
+      data[i + 3] = 0
     }
   }
   context.putImageData(image, 0, 0)

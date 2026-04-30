@@ -1,7 +1,13 @@
 {
   "source": {
     "name": "utm18n_46_05_1_1",
-    "url": "https://arcticdata.io/data/10.18739/A2610VT7V/earthdem/earthdem_03_conus/utm18n_46_05_1_1/output/utm18n_46_05_1_1_prob_v1.0.tif"
+    "url": "https://arcticdata.io/data/10.18739/A2610VT7V/earthdem/earthdem_03_conus/utm18n_46_05_1_1/output/utm18n_46_05_1_1_prob_v1.0.tif",
+    "projection": "EPSG:32618",
+    "geotransform": {
+      "originEasting": 538000,
+      "originNorthing": 4562000,
+      "pixelSize": 2
+    }
   },
   "rectangle": {
     "west": -74.08,
@@ -12,7 +18,15 @@
   "width": 1024,
   "height": 1024,
   "file": "storybook/assets/maxar/manhattan-water-probability.png",
-  "valid": 712882,
-  "water": 712882,
-  "encoding": "255 is no-data; all valid source pixels are treated as water-mask coverage for culling"
+  "valid": 761083,
+  "waterThreshold": 90,
+  "water": 129246,
+  "encoding": "0-100 is source water probability; 255 is no-data",
+  "resampling": "nearest-neighbour reprojection from EPSG:32618 into the lon/lat rectangle",
+  "sourcePixelWindow": {
+    "left": 19772,
+    "top": 20192,
+    "right": 28347,
+    "bottom": 30298
+  }
 }
