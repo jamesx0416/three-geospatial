@@ -1,32 +1,65 @@
 {
   "source": {
-    "name": "utm18n_46_05_1_1",
-    "url": "https://arcticdata.io/data/10.18739/A2610VT7V/earthdem/earthdem_03_conus/utm18n_46_05_1_1/output/utm18n_46_05_1_1_prob_v1.0.tif",
     "projection": "EPSG:32618",
-    "geotransform": {
-      "originEasting": 538000,
-      "originNorthing": 4562000,
-      "pixelSize": 2
-    }
+    "url": "https://arcticdata.io/data/10.18739/A2610VT7V/earthdem/earthdem_03_conus/",
+    "description": "Mosaic of four neighboring Maxar water probability subtiles"
   },
   "rectangle": {
-    "west": -74.08,
-    "south": 40.66,
-    "east": -73.88,
-    "north": 40.84
+    "west": -74.55423086017844,
+    "south": 40.07668324876217,
+    "east": -73.06813098242732,
+    "north": 41.208482123651685
   },
-  "width": 1024,
-  "height": 1024,
+  "utmBounds": {
+    "west": 538000,
+    "east": 662002,
+    "south": 4437998,
+    "north": 4562000
+  },
+  "width": 4096,
+  "height": 4096,
   "file": "storybook/assets/maxar/manhattan-water-probability.png",
-  "valid": 761083,
+  "valid": 5358252,
   "waterThreshold": 90,
-  "water": 129246,
+  "water": 2107685,
   "encoding": "0-100 is source water probability; 255 is no-data",
-  "resampling": "nearest-neighbour reprojection from EPSG:32618 into the lon/lat rectangle",
-  "sourcePixelWindow": {
-    "left": 19772,
-    "top": 20192,
-    "right": 28347,
-    "bottom": 30298
-  }
+  "resampling": "nearest-neighbour reprojection from EPSG:32618 into the lon/lat rectangle, mosaicked from overlapping source subtiles",
+  "sourceFiles": [
+    {
+      "file": "utm18n_46_05_1_1_prob_v1.0.tif",
+      "originEasting": 538000,
+      "originNorthing": 4562000,
+      "pixelSize": 2,
+      "width": 37001,
+      "height": 37001,
+      "fillPixels": 1179029
+    },
+    {
+      "file": "utm18n_46_05_1_2_prob_v1.0.tif",
+      "originEasting": 588000,
+      "originNorthing": 4562000,
+      "pixelSize": 2,
+      "width": 37001,
+      "height": 37001,
+      "fillPixels": 2672597
+    },
+    {
+      "file": "utm18n_45_05_2_1_prob_v1.0.tif",
+      "originEasting": 538000,
+      "originNorthing": 4512000,
+      "pixelSize": 2,
+      "width": 37001,
+      "height": 37001,
+      "fillPixels": 1291357
+    },
+    {
+      "file": "utm18n_45_05_2_2_prob_v1.0.tif",
+      "originEasting": 588000,
+      "originNorthing": 4512000,
+      "pixelSize": 2,
+      "width": 37001,
+      "height": 37001,
+      "fillPixels": 215269
+    }
+  ]
 }

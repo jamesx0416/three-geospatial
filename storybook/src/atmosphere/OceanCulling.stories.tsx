@@ -11,6 +11,7 @@ import {
   CanvasTexture,
   DoubleSide,
   Float32BufferAttribute,
+  LinearMipmapLinearFilter,
   NearestFilter,
   Vector3
 } from 'three'
@@ -27,18 +28,18 @@ import { WaterOccurrenceTilesPlugin } from '../plugins/WaterOccurrenceTilesPlugi
 import { Story } from './3DTilesRenderer-Story'
 
 const MAXAR_WATER_PROBABILITY_PATH =
-  '/public/maxar/manhattan-water-probability.png'
+  '/public/maxar/manhattan-water-probability.png?v=maxar-mosaic-4'
 const MAXAR_WATER_PROBABILITY_RECTANGLE = new Rectangle(
-  radians(-74.08),
-  radians(40.66),
-  radians(-73.88),
-  radians(40.84)
+  radians(-74.55423086017844),
+  radians(40.07668324876217),
+  radians(-73.06813098242732),
+  radians(41.208482123651685)
 )
 const MAXAR_LAND_THRESHOLD = 0
 const MAXAR_WATER_THRESHOLD = 90
 const MAXAR_OVERLAY_ALTITUDE = 80
 const MAXAR_OVERLAY_ALPHA = 220
-const MAXAR_OVERLAY_SEGMENTS = 96
+const MAXAR_OVERLAY_SEGMENTS = 256
 
 let maxarWaterClassifierPromise:
   | Promise<WaterOccurrenceTileClassifier>
@@ -60,8 +61,8 @@ export const Manhattan: StoryFn = () => {
       longitude={-73.9709}
       latitude={40.7589}
       heading={-155}
-      pitch={-35}
-      distance={3000}
+      pitch={-45}
+      distance={12000}
       exposure={60}
       dayOfYear={1}
       timeOfDay={7.6}
@@ -118,7 +119,7 @@ function MaxarClassificationOverlay(): ReactElement | null {
       <meshBasicMaterial
         map={texture}
         transparent
-        depthTest
+        depthTest={false}
         depthWrite={false}
         side={DoubleSide}
         toneMapped={false}
@@ -225,8 +226,8 @@ async function loadMaxarClassificationOverlayTexture(
   maxarOverlayTexturePromise ??= loadMaxarOverlayCanvas(path).then(canvas => {
     const texture = new CanvasTexture(canvas)
     texture.flipY = true
-    texture.generateMipmaps = false
-    texture.minFilter = NearestFilter
+    texture.generateMipmaps = true
+    texture.minFilter = LinearMipmapLinearFilter
     texture.magFilter = NearestFilter
     texture.needsUpdate = true
     return texture
