@@ -64,6 +64,7 @@ export default {
 
 export const Manhattan: StoryFn = () => {
   const classifier = useMaxarManhattanWaterClassifier()
+  const maskTexture = useMaxarClassificationOverlayTexture()
 
   return (
     <Story
@@ -78,11 +79,15 @@ export const Manhattan: StoryFn = () => {
       globeChildren={
         <>
           <MaxarClassificationOverlay />
-          {classifier != null && (
+          {classifier != null && maskTexture != null && (
             <TilesPlugin
               plugin={WaterOccurrenceTilesPlugin}
               args={{
                 classifier,
+                coloredClasses: [],
+                culledClasses: ['water'],
+                maskedClasses: ['shoreline'],
+                maskTexture,
                 colorSampleGridSize: 48,
                 debug: false,
                 maxDebugLogs: 500,
@@ -147,7 +152,7 @@ function useMaxarClassificationOverlayTexture(): CanvasTexture | undefined {
           setTexture(texture)
         }
       })
-      .catch(error => {
+      .catch((error: unknown) => {
         console.error(error)
       })
     return () => {
@@ -171,7 +176,7 @@ function useMaxarManhattanWaterClassifier():
           setClassifier(classifier)
         }
       })
-      .catch(error => {
+      .catch((error: unknown) => {
         console.error(error)
       })
     return () => {
@@ -182,7 +187,7 @@ function useMaxarManhattanWaterClassifier():
   return classifier
 }
 
-function loadMaxarManhattanWaterClassifier(): Promise<WaterOccurrenceTileClassifier> {
+async function loadMaxarManhattanWaterClassifier(): Promise<WaterOccurrenceTileClassifier> {
   maxarWaterClassifierPromise ??= loadWaterOccurrenceRaster().then(
     raster =>
       new WaterOccurrenceTileClassifier(raster, {
@@ -190,7 +195,7 @@ function loadMaxarManhattanWaterClassifier(): Promise<WaterOccurrenceTileClassif
         waterThreshold: MAXAR_WATER_THRESHOLD
       })
   )
-  return maxarWaterClassifierPromise
+  return await maxarWaterClassifierPromise
 }
 
 async function loadWaterOccurrenceRaster(): Promise<WaterOccurrenceRaster> {
@@ -206,7 +211,7 @@ async function loadWaterOccurrenceRaster(): Promise<WaterOccurrenceRaster> {
 
 async function loadMaxarRasterImage(path: string): Promise<MaxarRasterImage> {
   maxarRasterImagePromise ??= loadMaxarRasterImageUncached(path)
-  return maxarRasterImagePromise
+  return await maxarRasterImagePromise
 }
 
 async function loadMaxarRasterImageUncached(
@@ -259,7 +264,7 @@ async function loadMaxarClassificationOverlayTexture(
     texture.needsUpdate = true
     return texture
   })
-  return maxarOverlayTexturePromise
+  return await maxarOverlayTexturePromise
 }
 
 function createMaxarOverlayCanvas(
