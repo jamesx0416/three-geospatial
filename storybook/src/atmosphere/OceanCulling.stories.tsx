@@ -39,12 +39,21 @@ const MAXAR_LAND_THRESHOLD = 0
 const MAXAR_WATER_THRESHOLD = 90
 const MAXAR_OVERLAY_ALTITUDE = 80
 const MAXAR_OVERLAY_ALPHA = 220
-const MAXAR_OVERLAY_SEGMENTS = 256
+const MAXAR_OVERLAY_SEGMENTS = 96
+const MAXAR_OVERLAY_TEXTURE_SIZE = 2048
 
 let maxarWaterClassifierPromise:
   | Promise<WaterOccurrenceTileClassifier>
   | undefined
+let maxarRasterImagePromise: Promise<MaxarRasterImage> | undefined
 let maxarOverlayTexturePromise: Promise<CanvasTexture> | undefined
+
+interface MaxarRasterImage {
+  readonly width: number
+  readonly height: number
+  readonly classificationData: Uint8Array
+  readonly overlayCanvas: HTMLCanvasElement
+}
 
 export default {
   title: 'atmosphere/Ocean Culling',
@@ -74,9 +83,8 @@ export const Manhattan: StoryFn = () => {
               plugin={WaterOccurrenceTilesPlugin}
               args={{
                 classifier,
-                colorSampleGridSize: 96,
-                debug: true,
-                debugLogLevel: 'info',
+                colorSampleGridSize: 48,
+                debug: false,
                 maxDebugLogs: 500,
                 maximumColorRectangleHeight: radians(0.01),
                 maximumColorRectangleWidth: radians(0.01),
@@ -175,9 +183,7 @@ function useMaxarManhattanWaterClassifier():
 }
 
 function loadMaxarManhattanWaterClassifier(): Promise<WaterOccurrenceTileClassifier> {
-  maxarWaterClassifierPromise ??= loadWaterOccurrenceRaster(
-    MAXAR_WATER_PROBABILITY_PATH
-  ).then(
+  maxarWaterClassifierPromise ??= loadWaterOccurrenceRaster().then(
     raster =>
       new WaterOccurrenceTileClassifier(raster, {
         landThreshold: MAXAR_LAND_THRESHOLD,
@@ -187,9 +193,25 @@ function loadMaxarManhattanWaterClassifier(): Promise<WaterOccurrenceTileClassif
   return maxarWaterClassifierPromise
 }
 
-async function loadWaterOccurrenceRaster(
+async function loadWaterOccurrenceRaster(): Promise<WaterOccurrenceRaster> {
+  const image = await loadMaxarRasterImage(MAXAR_WATER_PROBABILITY_PATH)
+  return new WaterOccurrenceRaster({
+    width: image.width,
+    height: image.height,
+    data: image.classificationData,
+    rectangle: MAXAR_WATER_PROBABILITY_RECTANGLE,
+    noData: 255
+  })
+}
+
+async function loadMaxarRasterImage(path: string): Promise<MaxarRasterImage> {
+  maxarRasterImagePromise ??= loadMaxarRasterImageUncached(path)
+  return maxarRasterImagePromise
+}
+
+async function loadMaxarRasterImageUncached(
   path: string
-): Promise<WaterOccurrenceRaster> {
+): Promise<MaxarRasterImage> {
   const response = await fetch(path)
   if (!response.ok) {
     throw new Error(
@@ -197,33 +219,38 @@ async function loadWaterOccurrenceRaster(
     )
   }
   const bitmap = await createImageBitmap(await response.blob())
+  const { width, height } = bitmap
   const canvas = document.createElement('canvas')
-  canvas.width = bitmap.width
-  canvas.height = bitmap.height
-  const context = canvas.getContext('2d')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d', { willReadFrequently: true })
   if (context == null) {
     bitmap.close()
     throw new Error('Failed to create canvas context')
   }
   context.drawImage(bitmap, 0, 0)
-  const data = context.getImageData(0, 0, bitmap.width, bitmap.height).data
+  const source = context.getImageData(0, 0, width, height).data
   bitmap.close()
 
-  return new WaterOccurrenceRaster({
-    width: canvas.width,
-    height: canvas.height,
-    data,
-    rectangle: MAXAR_WATER_PROBABILITY_RECTANGLE,
-    channels: 4,
-    channel: 0,
-    noData: 255
-  })
+  const classificationData = new Uint8Array(width * height)
+  for (let sourceIndex = 0, targetIndex = 0; sourceIndex < source.length; ) {
+    classificationData[targetIndex++] = source[sourceIndex]
+    sourceIndex += 4
+  }
+
+  return {
+    width,
+    height,
+    classificationData,
+    overlayCanvas: createMaxarOverlayCanvas(classificationData, width, height)
+  }
 }
 
 async function loadMaxarClassificationOverlayTexture(
   path: string
 ): Promise<CanvasTexture> {
-  maxarOverlayTexturePromise ??= loadMaxarOverlayCanvas(path).then(canvas => {
+  maxarOverlayTexturePromise ??= loadMaxarRasterImage(path).then(image => {
+    const canvas = image.overlayCanvas
     const texture = new CanvasTexture(canvas)
     texture.flipY = true
     texture.generateMipmaps = true
@@ -235,40 +262,44 @@ async function loadMaxarClassificationOverlayTexture(
   return maxarOverlayTexturePromise
 }
 
-async function loadMaxarOverlayCanvas(path: string): Promise<HTMLCanvasElement> {
-  const response = await fetch(path)
-  if (!response.ok) {
-    throw new Error(
-      `Failed to load Maxar classification overlay raster: ${response.status}`
-    )
-  }
-
-  const bitmap = await createImageBitmap(await response.blob())
+function createMaxarOverlayCanvas(
+  data: Uint8Array,
+  width: number,
+  height: number
+): HTMLCanvasElement {
+  const scale = Math.min(
+    1,
+    MAXAR_OVERLAY_TEXTURE_SIZE / Math.max(width, height)
+  )
+  const overlayWidth = Math.max(1, Math.round(width * scale))
+  const overlayHeight = Math.max(1, Math.round(height * scale))
   const canvas = document.createElement('canvas')
-  canvas.width = bitmap.width
-  canvas.height = bitmap.height
+  canvas.width = overlayWidth
+  canvas.height = overlayHeight
   const context = canvas.getContext('2d')
   if (context == null) {
-    bitmap.close()
     throw new Error('Failed to create canvas context')
   }
 
-  context.drawImage(bitmap, 0, 0)
-  const image = context.getImageData(0, 0, bitmap.width, bitmap.height)
-  const data = image.data
-  for (let i = 0; i < data.length; i += 4) {
-    const value = data[i]
-    if (value !== 255 && value >= MAXAR_WATER_THRESHOLD) {
-      data[i] = 255
-      data[i + 1] = 0
-      data[i + 2] = 0
-      data[i + 3] = MAXAR_OVERLAY_ALPHA
-    } else {
-      data[i + 3] = 0
+  const image = context.createImageData(overlayWidth, overlayHeight)
+  const target = image.data
+  for (let y = 0; y < overlayHeight; y += 1) {
+    const sourceY = Math.min(Math.floor(y / scale), height - 1)
+    for (let x = 0; x < overlayWidth; x += 1) {
+      const sourceX = Math.min(Math.floor(x / scale), width - 1)
+      const value = data[sourceY * width + sourceX]
+      const targetIndex = (y * overlayWidth + x) * 4
+      if (value !== 255 && value >= MAXAR_WATER_THRESHOLD) {
+        target[targetIndex] = 255
+        target[targetIndex + 1] = 0
+        target[targetIndex + 2] = 0
+        target[targetIndex + 3] = MAXAR_OVERLAY_ALPHA
+      } else {
+        target[targetIndex + 3] = 0
+      }
     }
   }
   context.putImageData(image, 0, 0)
-  bitmap.close()
 
   return canvas
 }
