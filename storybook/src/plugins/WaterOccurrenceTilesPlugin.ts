@@ -98,9 +98,12 @@ interface WaterMaskShader {
 
 const boxScratch = /*#__PURE__*/ new Box3()
 const matrixScratch = /*#__PURE__*/ new Matrix4()
+const waterMaskMatrixScratch = /*#__PURE__*/ new Matrix4()
+const waterMaskCenterScratch = /*#__PURE__*/ new Vector3()
 const sphereScratch = /*#__PURE__*/ new Sphere()
 const vectorScratch = /*#__PURE__*/ new Vector3()
 const cartographicScratch: CartographicLike = { lat: 0, lon: 0, height: 0 }
+const TWO_PI = Math.PI * 2
 const RADIANS_TO_DEGREES = 180 / Math.PI
 const TILE_COLOR = /*#__PURE__*/ new Color(0xff0000)
 
@@ -111,9 +114,16 @@ export interface WaterOccurrenceTilesPluginOptions {
   readonly maskedClasses?: readonly WaterOccurrenceClass[]
   readonly maskTexture?: Texture
   readonly maskRectangle?: RectangleLike
+  readonly maskWaterThreshold?: number
   readonly maskAlphaThreshold?: number
   readonly minimumWaterFraction?: number
   readonly minimumValidFraction?: number
+  readonly maximumCullRectangleWidth?: number
+  readonly maximumCullRectangleHeight?: number
+  readonly maximumCullScanSamples?: number
+  readonly allowApproximateTileCull?: boolean
+  readonly maximumMaskRectangleWidth?: number
+  readonly maximumMaskRectangleHeight?: number
   readonly maximumColorRectangleWidth?: number
   readonly maximumColorRectangleHeight?: number
   readonly colorSampleGridSize?: number
@@ -134,6 +144,7 @@ export class WaterOccurrenceTilesPlugin {
   readonly maskedClasses: ReadonlySet<WaterOccurrenceClass>
   readonly maskTexture?: Texture
   readonly maskRectangle: Rectangle
+  readonly maskWaterThreshold: number
   readonly maskAlphaThreshold: number
   readonly onTileClassified?: (
     tile: Tile,
@@ -141,6 +152,12 @@ export class WaterOccurrenceTilesPlugin {
   ) => void
   readonly minimumWaterFraction?: number
   readonly minimumValidFraction: number
+  readonly maximumCullRectangleWidth: number
+  readonly maximumCullRectangleHeight: number
+  readonly maximumCullScanSamples: number
+  readonly allowApproximateTileCull: boolean
+  readonly maximumMaskRectangleWidth: number
+  readonly maximumMaskRectangleHeight: number
   readonly maximumColorRectangleWidth: number
   readonly maximumColorRectangleHeight: number
   readonly colorSampleGridSize: number
@@ -159,6 +176,7 @@ export class WaterOccurrenceTilesPlugin {
   private readonly coloredTiles = new WeakSet<Tile>()
   private readonly maskedTiles = new WeakSet<Tile>()
   private readonly maskedMaterials = new WeakMap<Material, Material>()
+  private readonly cullableTiles = new WeakMap<Tile, boolean>()
   private debugLogCount = 0
   private colorSetLogCount = 0
   private colorPendingLogCount = 0
@@ -185,9 +203,16 @@ export class WaterOccurrenceTilesPlugin {
       maskedClasses = ['shoreline'],
       maskTexture,
       maskRectangle = classifier.raster.rectangle,
+      maskWaterThreshold = 0.5,
       maskAlphaThreshold = 0.5,
       minimumWaterFraction,
       minimumValidFraction = 1,
+      maximumCullRectangleWidth = Infinity,
+      maximumCullRectangleHeight = Infinity,
+      maximumCullScanSamples = 65536,
+      allowApproximateTileCull = false,
+      maximumMaskRectangleWidth = Infinity,
+      maximumMaskRectangleHeight = Infinity,
       maximumColorRectangleWidth = Infinity,
       maximumColorRectangleHeight = Infinity,
       colorSampleGridSize = 64,
@@ -202,9 +227,16 @@ export class WaterOccurrenceTilesPlugin {
     this.maskedClasses = new Set(maskedClasses)
     this.maskTexture = maskTexture
     this.maskRectangle = new Rectangle().copy(maskRectangle)
+    this.maskWaterThreshold = maskWaterThreshold
     this.maskAlphaThreshold = maskAlphaThreshold
     this.minimumWaterFraction = minimumWaterFraction
     this.minimumValidFraction = minimumValidFraction
+    this.maximumCullRectangleWidth = maximumCullRectangleWidth
+    this.maximumCullRectangleHeight = maximumCullRectangleHeight
+    this.maximumCullScanSamples = maximumCullScanSamples
+    this.allowApproximateTileCull = allowApproximateTileCull
+    this.maximumMaskRectangleWidth = maximumMaskRectangleWidth
+    this.maximumMaskRectangleHeight = maximumMaskRectangleHeight
     this.maximumColorRectangleWidth = maximumColorRectangleWidth
     this.maximumColorRectangleHeight = maximumColorRectangleHeight
     this.colorSampleGridSize = colorSampleGridSize
@@ -222,8 +254,20 @@ export class WaterOccurrenceTilesPlugin {
       culledClasses: [...this.culledClasses],
       maskedClasses: [...this.maskedClasses],
       hasMaskTexture: this.maskTexture != null,
+      maskWaterThreshold: this.maskWaterThreshold,
+      maskAlphaThreshold: this.maskAlphaThreshold,
       minimumWaterFraction: this.minimumWaterFraction,
       minimumValidFraction: this.minimumValidFraction,
+      maximumCullRectangleDegrees: {
+        width: this.maximumCullRectangleWidth * RADIANS_TO_DEGREES,
+        height: this.maximumCullRectangleHeight * RADIANS_TO_DEGREES
+      },
+      maximumCullScanSamples: this.maximumCullScanSamples,
+      allowApproximateTileCull: this.allowApproximateTileCull,
+      maximumMaskRectangleDegrees: {
+        width: this.maximumMaskRectangleWidth * RADIANS_TO_DEGREES,
+        height: this.maximumMaskRectangleHeight * RADIANS_TO_DEGREES
+      },
       maximumColorRectangleDegrees: {
         width: this.maximumColorRectangleWidth * RADIANS_TO_DEGREES,
         height: this.maximumColorRectangleHeight * RADIANS_TO_DEGREES
@@ -255,9 +299,14 @@ export class WaterOccurrenceTilesPlugin {
 
   // Plugin method
   calculateTileViewError(tile: Tile, target: TileViewErrorTarget): boolean {
+    if (!this.canChangeTileViewError()) {
+      return false
+    }
+
     const classification = this.classifyTile(tile)
     const shouldColor = classification != null && this.shouldColor(classification)
-    const shouldCull = classification != null && this.shouldCull(classification)
+    const shouldCull =
+      classification != null && this.shouldCull(tile, classification)
     const validFraction =
       classification != null && classification.samples > 0
         ? classification.validSamples / classification.samples
@@ -371,12 +420,68 @@ export class WaterOccurrenceTilesPlugin {
     )
   }
 
-  private shouldCull(classification: WaterOccurrenceClassification): boolean {
+  private canChangeTileViewError(): boolean {
     return (
-      this.culledClasses.has(classification.class) &&
-      classification.samples > 0 &&
-      classification.validSamples / classification.samples >=
-        this.minimumValidFraction &&
+      this.culledClasses.size > 0 ||
+      this.coloredClasses.size > 0 ||
+      this.minimumWaterFraction != null
+    )
+  }
+
+  private shouldCull(
+    tile: Tile,
+    classification: WaterOccurrenceClassification
+  ): boolean {
+    const cached = this.cullableTiles.get(tile)
+    if (cached != null) {
+      return cached
+    }
+    if (!this.isCullClassification(classification)) {
+      this.cullableTiles.set(tile, false)
+      return false
+    }
+    if (!this.allowApproximateTileCull && !hasTileRegion(tile)) {
+      this.cullableTiles.set(tile, false)
+      return false
+    }
+    const rectangle = this.getClassificationRectangle(tile)
+    if (rectangle == null || !this.shouldCullRectangle(rectangle)) {
+      this.cullableTiles.set(tile, false)
+      return false
+    }
+    const scanSamples = estimateRasterPixelCount(
+      rectangle,
+      this.classifier.raster.rectangle,
+      this.classifier.raster.width,
+      this.classifier.raster.height
+    )
+    if (
+      scanSamples <= 0 ||
+      scanSamples > this.maximumCullScanSamples
+    ) {
+      this.cullableTiles.set(tile, false)
+      return false
+    }
+    const strictClassification = this.classifier.classifyRectangle(rectangle, {
+      maxScanSamples: Number.MAX_SAFE_INTEGER
+    })
+    const result = this.isCullClassification(strictClassification)
+    this.cullableTiles.set(tile, result)
+    return result
+  }
+
+  private isCullClassification(
+    classification: WaterOccurrenceClassification
+  ): boolean {
+    if (
+      !this.culledClasses.has(classification.class) ||
+      classification.samples === 0
+    ) {
+      return false
+    }
+    const validFraction = classification.validSamples / classification.samples
+    return (
+      validFraction >= this.minimumValidFraction &&
       (this.minimumWaterFraction == null ||
         classification.waterFraction >= this.minimumWaterFraction)
     )
@@ -500,8 +605,14 @@ export class WaterOccurrenceTilesPlugin {
       return
     }
 
-    const ellipsoid = this.tiles?.ellipsoid
-    if (ellipsoid == null) {
+    const rectangle = this.getClassificationRectangle(tile)
+    if (rectangle == null || !this.shouldMaskRectangle(rectangle)) {
+      return
+    }
+
+    const { tiles } = this
+    const ellipsoid = tiles?.ellipsoid
+    if (tiles == null || ellipsoid == null) {
       return
     }
 
@@ -514,7 +625,17 @@ export class WaterOccurrenceTilesPlugin {
         return
       }
 
-      if (!this.setWaterMaskUvAttribute(geometry, mesh, ellipsoid)) {
+      waterMaskMatrixScratch.copy(mesh.matrixWorld)
+      if (scene.parent !== null) {
+        waterMaskMatrixScratch.premultiply(tiles.group.matrixWorldInverse)
+      }
+      if (
+        !this.setWaterMaskUvAttribute(
+          geometry,
+          waterMaskMatrixScratch,
+          ellipsoid
+        )
+      ) {
         return
       }
 
@@ -542,7 +663,7 @@ export class WaterOccurrenceTilesPlugin {
 
   private setWaterMaskUvAttribute(
     geometry: BufferGeometry,
-    object: Object3D,
+    matrix: Matrix4,
     ellipsoid: EllipsoidLike
   ): boolean {
     const position = geometry.getAttribute('position')
@@ -551,15 +672,61 @@ export class WaterOccurrenceTilesPlugin {
     }
 
     const { maskRectangle } = this
+    const maskRectangleWidth = getRectangleWidth(maskRectangle)
+
+    waterMaskCenterScratch.set(0, 0, 0)
+    let finitePositionCount = 0
+    for (let i = 0; i < position.count; i += 1) {
+      vectorScratch.fromBufferAttribute(position, i)
+      if (!isFiniteVector(vectorScratch)) {
+        continue
+      }
+      vectorScratch.applyMatrix4(matrix)
+      if (!isFiniteVector(vectorScratch)) {
+        continue
+      }
+      waterMaskCenterScratch.add(vectorScratch)
+      finitePositionCount += 1
+    }
+    if (finitePositionCount === 0) {
+      return false
+    }
+    waterMaskCenterScratch.multiplyScalar(1 / finitePositionCount)
+    const center = ellipsoid.getPositionToCartographic(
+      waterMaskCenterScratch,
+      cartographicScratch
+    )
+    const centerLat = Number.isFinite(center.lat) ? center.lat : 0
+    const centerLon = Number.isFinite(center.lon) ? center.lon : 0
+
     const uvs = new Float32Array(position.count * 2)
     for (let i = 0; i < position.count; i += 1) {
       vectorScratch.fromBufferAttribute(position, i)
-      vectorScratch.applyMatrix4(object.matrixWorld)
-      const { lon, lat } = ellipsoid.getPositionToCartographic(
+      vectorScratch.applyMatrix4(matrix)
+      const cartographic = ellipsoid.getPositionToCartographic(
         vectorScratch,
         cartographicScratch
       )
-      uvs[i * 2] = (lon - maskRectangle.west) / maskRectangle.width
+
+      let { lon, lat } = cartographic
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+        uvs[i * 2] = -1
+        uvs[i * 2 + 1] = -1
+        continue
+      }
+      if (Math.abs(Math.abs(lat) - Math.PI / 2) < 1e-5) {
+        lon = centerLon
+      }
+      if (Math.abs(centerLon - lon) > Math.PI) {
+        lon += Math.sign(centerLon - lon) * TWO_PI
+      }
+      if (Math.abs(centerLat - lat) > Math.PI) {
+        lat += Math.sign(centerLat - lat) * TWO_PI
+      }
+
+      uvs[i * 2] =
+        (unwrapLongitude(lon, maskRectangle.west) - maskRectangle.west) /
+        maskRectangleWidth
       uvs[i * 2 + 1] = (lat - maskRectangle.south) / maskRectangle.height
     }
     geometry.setAttribute('waterMaskUv', new BufferAttribute(uvs, 2))
@@ -584,7 +751,7 @@ export class WaterOccurrenceTilesPlugin {
       this.patchWaterMaskShader(shader)
     }
     maskedMaterial.customProgramCacheKey = (): string =>
-      `${previousProgramCacheKey()}|water-mask-v1`
+      `${previousProgramCacheKey()}|water-mask-v2`
     maskedMaterial.needsUpdate = true
     this.maskedMaterials.set(material, maskedMaterial)
     return maskedMaterial
@@ -592,6 +759,9 @@ export class WaterOccurrenceTilesPlugin {
 
   private patchWaterMaskShader(shader: WaterMaskShader): void {
     shader.uniforms.waterMaskTexture = { value: this.maskTexture }
+    shader.uniforms.waterMaskWaterThreshold = {
+      value: this.maskWaterThreshold
+    }
     shader.uniforms.waterMaskAlphaThreshold = {
       value: this.maskAlphaThreshold
     }
@@ -615,6 +785,7 @@ vWaterMaskUv = waterMaskUv;
       `
 #include <common>
 uniform sampler2D waterMaskTexture;
+uniform float waterMaskWaterThreshold;
 uniform float waterMaskAlphaThreshold;
 varying vec2 vWaterMaskUv;
 `
@@ -626,7 +797,10 @@ if (
   all(lessThanEqual(vWaterMaskUv, vec2(1.0)))
 ) {
   vec4 waterMask = texture2D(waterMaskTexture, vWaterMaskUv);
-  if (waterMask.a >= waterMaskAlphaThreshold) {
+  if (
+    waterMask.r >= waterMaskWaterThreshold &&
+    waterMask.a >= waterMaskAlphaThreshold
+  ) {
     discard;
   }
 }
@@ -662,6 +836,20 @@ if (
     return (
       rectangle.width <= this.maximumColorRectangleWidth &&
       rectangle.height <= this.maximumColorRectangleHeight
+    )
+  }
+
+  private shouldCullRectangle(rectangle: Rectangle): boolean {
+    return (
+      rectangle.width <= this.maximumCullRectangleWidth &&
+      rectangle.height <= this.maximumCullRectangleHeight
+    )
+  }
+
+  private shouldMaskRectangle(rectangle: Rectangle): boolean {
+    return (
+      rectangle.width <= this.maximumMaskRectangleWidth &&
+      rectangle.height <= this.maximumMaskRectangleHeight
     )
   }
 
@@ -741,6 +929,78 @@ function rectangleToDegrees(rectangle: Rectangle): Rectangle {
   )
 }
 
+function estimateRasterPixelCount(
+  rectangle: RectangleLike,
+  rasterRectangle: RectangleLike,
+  rasterWidth: number,
+  rasterHeight: number
+): number {
+  const longitudeOverlap = getLongitudeOverlapWidth(rectangle, rasterRectangle)
+  const latitudeOverlap = Math.max(
+    0,
+    Math.min(rectangle.north, rasterRectangle.north) -
+      Math.max(rectangle.south, rasterRectangle.south)
+  )
+  if (longitudeOverlap <= 0 || latitudeOverlap <= 0) {
+    return 0
+  }
+
+  const width = Math.ceil(
+    (longitudeOverlap / getRectangleWidth(rasterRectangle)) * rasterWidth
+  )
+  const height = Math.ceil(
+    (latitudeOverlap / (rasterRectangle.north - rasterRectangle.south)) *
+      rasterHeight
+  )
+  return width * height
+}
+
+function getLongitudeOverlapWidth(
+  rectangle: RectangleLike,
+  rasterRectangle: RectangleLike
+): number {
+  const west = unwrapLongitude(rectangle.west, rasterRectangle.west)
+  let east = unwrapLongitude(rectangle.east, west)
+  if (east < west) {
+    east += TWO_PI
+  }
+
+  const rasterWest = rasterRectangle.west
+  const rasterEast = rasterWest + getRectangleWidth(rasterRectangle)
+  let overlap = 0
+  for (const offset of [-TWO_PI, 0, TWO_PI]) {
+    const start = Math.max(west + offset, rasterWest)
+    const end = Math.min(east + offset, rasterEast)
+    overlap += Math.max(0, end - start)
+  }
+  return Math.min(overlap, getRectangleWidth(rasterRectangle))
+}
+
+function getRectangleWidth(rectangle: RectangleLike): number {
+  return rectangle.east >= rectangle.west
+    ? rectangle.east - rectangle.west
+    : rectangle.east + TWO_PI - rectangle.west
+}
+
+function unwrapLongitude(longitude: number, origin: number): number {
+  let unwrapped = longitude
+  while (unwrapped < origin) {
+    unwrapped += TWO_PI
+  }
+  while (unwrapped > origin + TWO_PI) {
+    unwrapped -= TWO_PI
+  }
+  return unwrapped
+}
+
+function isFiniteVector(vector: Vector3): boolean {
+  return (
+    Number.isFinite(vector.x) &&
+    Number.isFinite(vector.y) &&
+    Number.isFinite(vector.z)
+  )
+}
+
 function getTileRectangle(
   tile: Tile,
   target: Rectangle,
@@ -775,6 +1035,13 @@ function getTileRectangle(
     }
   }
   return undefined
+}
+
+function hasTileRegion(tile: Tile): boolean {
+  return (
+    (tile as TileWithRegion).boundingVolume?.region != null ||
+    (tile as TileWithRegion).engineData?.boundingVolume?.region != null
+  )
 }
 
 function getOBBRectangle(

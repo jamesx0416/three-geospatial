@@ -131,6 +131,8 @@ return true
 
 This prevents full-ocean tiles from being selected for rendering.
 
+The initial classification can be coarse for large Google parent tiles, so whole-tile culling should use a second strict check before masking the tile out. Until the precomputed pyramid exists, this should be an exhaustive raster-window scan under a bounded pixel budget. If the footprint would scan too many mask pixels, leave the tile visible and let fragment masking handle it.
+
 ### 4. Keep Full-Land and Unknown Tiles
 
 If a tile is `land`, leave it alone.
@@ -153,6 +155,12 @@ if (water >= waterThreshold) {
 
 This removes only the ocean part of a mixed tile while preserving land geometry and imagery.
 
+Current safety rules:
+
+- Do not apply mixed-tile shader masking to broad parent LODs. Coarse parent geometry can interpolate cartographic mask UVs too roughly, which can remove land. Keep those parents unchanged and let normal LOD refinement reach smaller mixed tiles.
+- Generate mask UVs in the tile renderer's ellipsoid frame. When a tile scene is already attached under the tiles group, premultiply mesh world matrices by `tiles.group.matrixWorldInverse`; when it is not attached yet, use the mesh world matrix directly. This matches the transform convention used by `3d-tiles-renderer` image overlays.
+- Whole-tile culling should require a trustworthy tile footprint. In the current implementation, culling defaults to exact `region` bounding volumes only; OBB/sphere-derived rectangles are still useful for classification and masking decisions, but they are not safe enough to delete a whole tile unless explicitly enabled.
+
 ## Why Discard Still Has Draw Cost
 
 `discard` happens inside the fragment shader. The GPU still has to issue the draw call, run the vertex shader, rasterize triangles, run enough fragment shader work to sample the mask, and then decide whether to discard the fragment.
@@ -170,6 +178,8 @@ It is still expected to be cheaper than forcing deeper Google LODs because it av
 - Cache classifications per tile with a `WeakMap`.
 - Use mipmapped water-mask textures so distant mixed tiles sample lower-resolution data.
 - Use a conservative threshold and valid-coverage requirement for full-ocean culling.
+- Confirm full-ocean culling with a bounded exhaustive second-pass classification to avoid dropping land when coarse samples miss islands or shoreline.
+- Use a raw probability/validity mask for shader discard, not the visual debug overlay.
 - Add a small dilation/erosion margin around shorelines to reduce flicker and mask mismatch.
 - Leave `unknown` tiles unchanged.
 - Skip fragment masking for very small screen-space mixed tiles if the visual difference is not worth the fill cost.
