@@ -43,16 +43,22 @@ const MAXAR_WATER_THRESHOLD = 90
 const MAXAR_OVERLAY_SEGMENTS = 96
 const MAXAR_FAR_MASK_ALTITUDE = 120
 const MAXAR_FAR_MASK_ALPHA = 245
-const MAXAR_MASK_TEXTURE_SIZES = [512, 1024, 2048] as const
+const MAXAR_MASK_TEXTURE_SIZES = [512, 768, 1024, 1536, 2048, 4096] as const
 const MAXAR_CANVAS_CACHE_LIMIT = 2
 const MAXAR_FAR_MASK_COLORS: Readonly<Record<MaxarMaskTextureSize, number>> = {
   512: 0x4e8cff,
+  768: 0x47c7ff,
   1024: 0xffba49,
-  2048: 0x3fd284
+  1536: 0xc8d84a,
+  2048: 0x3fd284,
+  4096: 0xffffff
 }
 const MAXAR_MASK_CAMERA_DISTANCE_TIERS: readonly MaxarMaskCameraDistanceTier[] = [
+  { maximumCameraDistance: 9000, textureSize: 4096 },
   { maximumCameraDistance: 18000, textureSize: 2048 },
+  { maximumCameraDistance: 26000, textureSize: 1536 },
   { maximumCameraDistance: 40000, textureSize: 1024 },
+  { maximumCameraDistance: 65000, textureSize: 768 },
   { maximumCameraDistance: Infinity, textureSize: 512 }
 ]
 
