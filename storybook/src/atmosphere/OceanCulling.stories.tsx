@@ -10,6 +10,7 @@ import {
   BufferGeometry,
   CanvasTexture,
   DoubleSide,
+  LinearFilter,
   Float32BufferAttribute,
   LinearMipmapLinearFilter,
   NearestFilter,
@@ -37,25 +38,26 @@ const MAXAR_WATER_PROBABILITY_RECTANGLE = new Rectangle(
 )
 const MAXAR_LAND_THRESHOLD = 0
 const MAXAR_WATER_THRESHOLD = 90
-const MAXAR_OVERLAY_ALTITUDE = 80
-const MAXAR_OVERLAY_ALPHA = 220
 const MAXAR_OVERLAY_SEGMENTS = 96
-const MAXAR_OVERLAY_TEXTURE_SIZE = 2048
 const MAXAR_MASK_TEXTURE_SIZE = 2048
+const MAXAR_FAR_MASK_TEXTURE_SIZE = 2048
+const MAXAR_FAR_MASK_ALTITUDE = 120
+const MAXAR_FAR_MASK_COLOR = [238, 232, 225] as const
+const MAXAR_FAR_MASK_ALPHA = 245
 
 let maxarWaterClassifierPromise:
   | Promise<WaterOccurrenceTileClassifier>
   | undefined
 let maxarRasterImagePromise: Promise<MaxarRasterImage> | undefined
-let maxarOverlayTexturePromise: Promise<CanvasTexture> | undefined
 let maxarMaskTexturePromise: Promise<CanvasTexture> | undefined
+let maxarFarMaskTexturePromise: Promise<CanvasTexture> | undefined
 
 interface MaxarRasterImage {
   readonly width: number
   readonly height: number
   readonly classificationData: Uint8Array
-  readonly overlayCanvas: HTMLCanvasElement
   readonly maskCanvas: HTMLCanvasElement
+  readonly farMaskCanvas: HTMLCanvasElement
 }
 
 export default {
@@ -81,7 +83,7 @@ export const Manhattan: StoryFn = () => {
       timeOfDay={7.6}
       globeChildren={
         <>
-          <MaxarClassificationOverlay />
+          <MaxarFarWaterMaskOverlay />
           {classifier != null && maskTexture != null && (
             <TilesPlugin
               plugin={WaterOccurrenceTilesPlugin}
@@ -103,14 +105,14 @@ export const Manhattan: StoryFn = () => {
   )
 }
 
-function MaxarClassificationOverlay(): ReactElement | null {
-  const texture = useMaxarClassificationOverlayTexture()
+function MaxarFarWaterMaskOverlay(): ReactElement | null {
+  const texture = useMaxarFarWaterMaskTexture()
   const geometry = useMemo(
     () =>
       createRectangleOverlayGeometry(
         MAXAR_WATER_PROBABILITY_RECTANGLE,
         MAXAR_OVERLAY_SEGMENTS,
-        MAXAR_OVERLAY_ALTITUDE
+        MAXAR_FAR_MASK_ALTITUDE
       ),
     []
   )
@@ -127,7 +129,7 @@ function MaxarClassificationOverlay(): ReactElement | null {
   }
 
   return (
-    <mesh geometry={geometry} renderOrder={1000}>
+    <mesh geometry={geometry} renderOrder={999}>
       <meshBasicMaterial
         map={texture}
         transparent
@@ -140,12 +142,12 @@ function MaxarClassificationOverlay(): ReactElement | null {
   )
 }
 
-function useMaxarClassificationOverlayTexture(): CanvasTexture | undefined {
+function useMaxarFarWaterMaskTexture(): CanvasTexture | undefined {
   const [texture, setTexture] = useState<CanvasTexture>()
 
   useEffect(() => {
     let disposed = false
-    loadMaxarClassificationOverlayTexture(MAXAR_WATER_PROBABILITY_PATH)
+    loadMaxarFarWaterMaskTexture(MAXAR_WATER_PROBABILITY_PATH)
       .then(texture => {
         if (!disposed) {
           setTexture(texture)
@@ -268,25 +270,24 @@ async function loadMaxarRasterImageUncached(
     width,
     height,
     classificationData,
-    overlayCanvas: createMaxarOverlayCanvas(classificationData, width, height),
-    maskCanvas: createMaxarMaskCanvas(classificationData, width, height)
+    maskCanvas: createMaxarMaskCanvas(classificationData, width, height),
+    farMaskCanvas: createMaxarFarMaskCanvas(classificationData, width, height)
   }
 }
 
-async function loadMaxarClassificationOverlayTexture(
+async function loadMaxarFarWaterMaskTexture(
   path: string
 ): Promise<CanvasTexture> {
-  maxarOverlayTexturePromise ??= loadMaxarRasterImage(path).then(image => {
-    const canvas = image.overlayCanvas
-    const texture = new CanvasTexture(canvas)
+  maxarFarMaskTexturePromise ??= loadMaxarRasterImage(path).then(image => {
+    const texture = new CanvasTexture(image.farMaskCanvas)
     texture.flipY = true
     texture.generateMipmaps = true
     texture.minFilter = LinearMipmapLinearFilter
-    texture.magFilter = NearestFilter
+    texture.magFilter = LinearFilter
     texture.needsUpdate = true
     return texture
   })
-  return await maxarOverlayTexturePromise
+  return await maxarFarMaskTexturePromise
 }
 
 async function loadMaxarWaterMaskTexture(path: string): Promise<CanvasTexture> {
@@ -336,45 +337,39 @@ function createMaxarMaskCanvas(
   return canvas
 }
 
-function createMaxarOverlayCanvas(
+function createMaxarFarMaskCanvas(
   data: Uint8Array,
   width: number,
   height: number
 ): HTMLCanvasElement {
-  const scale = Math.min(
-    1,
-    MAXAR_OVERLAY_TEXTURE_SIZE / Math.max(width, height)
-  )
-  const overlayWidth = Math.max(1, Math.round(width * scale))
-  const overlayHeight = Math.max(1, Math.round(height * scale))
+  const scale = Math.min(1, MAXAR_FAR_MASK_TEXTURE_SIZE / Math.max(width, height))
+  const maskWidth = Math.max(1, Math.round(width * scale))
+  const maskHeight = Math.max(1, Math.round(height * scale))
   const canvas = document.createElement('canvas')
-  canvas.width = overlayWidth
-  canvas.height = overlayHeight
+  canvas.width = maskWidth
+  canvas.height = maskHeight
   const context = canvas.getContext('2d')
   if (context == null) {
     throw new Error('Failed to create canvas context')
   }
 
-  const image = context.createImageData(overlayWidth, overlayHeight)
+  const image = context.createImageData(maskWidth, maskHeight)
   const target = image.data
-  for (let y = 0; y < overlayHeight; y += 1) {
+  for (let y = 0; y < maskHeight; y += 1) {
     const sourceY = Math.min(Math.floor(y / scale), height - 1)
-    for (let x = 0; x < overlayWidth; x += 1) {
+    for (let x = 0; x < maskWidth; x += 1) {
       const sourceX = Math.min(Math.floor(x / scale), width - 1)
       const value = data[sourceY * width + sourceX]
-      const targetIndex = (y * overlayWidth + x) * 4
+      const targetIndex = (y * maskWidth + x) * 4
       if (value !== 255 && value >= MAXAR_WATER_THRESHOLD) {
-        target[targetIndex] = 255
-        target[targetIndex + 1] = 0
-        target[targetIndex + 2] = 0
-        target[targetIndex + 3] = MAXAR_OVERLAY_ALPHA
-      } else {
-        target[targetIndex + 3] = 0
+        target[targetIndex] = MAXAR_FAR_MASK_COLOR[0]
+        target[targetIndex + 1] = MAXAR_FAR_MASK_COLOR[1]
+        target[targetIndex + 2] = MAXAR_FAR_MASK_COLOR[2]
+        target[targetIndex + 3] = MAXAR_FAR_MASK_ALPHA
       }
     }
   }
   context.putImageData(image, 0, 0)
-
   return canvas
 }
 

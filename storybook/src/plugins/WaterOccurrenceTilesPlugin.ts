@@ -280,7 +280,12 @@ export class WaterOccurrenceTilesPlugin {
       colorSampleGridSize: this.colorSampleGridSize,
       debugLogLevel: this.debugLogLevel
     })
+
+    tiles.forEachLoadedModel((scene, tile) => {
+      this.processTileModel(scene, tile)
+    })
     tiles.dispatchEvent({ type: 'needs-update' })
+    tiles.dispatchEvent({ type: 'needs-render' })
   }
 
   // Plugin method
