@@ -112,6 +112,7 @@ export interface WaterOccurrenceTilesPluginOptions {
   readonly coloredClasses?: readonly WaterOccurrenceClass[]
   readonly culledClasses?: readonly WaterOccurrenceClass[]
   readonly maskedClasses?: readonly WaterOccurrenceClass[]
+  readonly maskAllIntersectingTiles?: boolean
   readonly maskTexture?: Texture
   readonly maskRectangle?: RectangleLike
   readonly maskWaterThreshold?: number
@@ -142,6 +143,7 @@ export class WaterOccurrenceTilesPlugin {
   readonly coloredClasses: ReadonlySet<WaterOccurrenceClass>
   readonly culledClasses: ReadonlySet<WaterOccurrenceClass>
   readonly maskedClasses: ReadonlySet<WaterOccurrenceClass>
+  readonly maskAllIntersectingTiles: boolean
   readonly maskTexture?: Texture
   readonly maskRectangle: Rectangle
   readonly maskWaterThreshold: number
@@ -201,6 +203,7 @@ export class WaterOccurrenceTilesPlugin {
       coloredClasses,
       culledClasses = ['water'],
       maskedClasses = ['shoreline'],
+      maskAllIntersectingTiles = false,
       maskTexture,
       maskRectangle = classifier.raster.rectangle,
       maskWaterThreshold = 0.5,
@@ -225,6 +228,7 @@ export class WaterOccurrenceTilesPlugin {
     this.coloredClasses = new Set(coloredClasses ?? [])
     this.culledClasses = new Set(culledClasses)
     this.maskedClasses = new Set(maskedClasses)
+    this.maskAllIntersectingTiles = maskAllIntersectingTiles
     this.maskTexture = maskTexture
     this.maskRectangle = new Rectangle().copy(maskRectangle)
     this.maskWaterThreshold = maskWaterThreshold
@@ -253,6 +257,7 @@ export class WaterOccurrenceTilesPlugin {
       coloredClasses: [...this.coloredClasses],
       culledClasses: [...this.culledClasses],
       maskedClasses: [...this.maskedClasses],
+      maskAllIntersectingTiles: this.maskAllIntersectingTiles,
       hasMaskTexture: this.maskTexture != null,
       maskWaterThreshold: this.maskWaterThreshold,
       maskAlphaThreshold: this.maskAlphaThreshold,
@@ -487,28 +492,41 @@ export class WaterOccurrenceTilesPlugin {
     )
   }
 
-  private shouldMask(classification: WaterOccurrenceClassification): boolean {
-    return this.maskedClasses.has(classification.class)
+  private shouldMask(
+    rectangle?: Rectangle,
+    classification?: WaterOccurrenceClassification | null
+  ): boolean {
+    if (this.maskAllIntersectingTiles) {
+      return rectangle != null && rectanglesOverlap(rectangle, this.maskRectangle)
+    }
+    return classification != null && this.maskedClasses.has(classification.class)
   }
 
   private applyTileColor(
     tile: Tile,
     scene = (tile as TileWithRegion).engineData?.scene,
-    classification = this.classifyTile(tile)
+    classification?: WaterOccurrenceClassification | null
   ): void {
     if (this.coloredTiles.has(tile)) {
       return
     }
-    if (classification == null || !this.shouldColor(classification)) {
+    if (!this.canApplyTileColor()) {
+      return
+    }
+    const tileClassification = classification ?? this.classifyTile(tile)
+    if (
+      tileClassification == null ||
+      !this.shouldColor(tileClassification)
+    ) {
       return
     }
     const rectangle = this.getClassificationRectangle(tile)
     if (rectangle == null || !this.shouldColorRectangle(rectangle)) {
       this.logTileColor('tile colour skipped', {
         reason: rectangle == null ? 'missing-rectangle' : 'large-footprint',
-        class: classification.class,
-        waterFraction: classification.waterFraction,
-        validFraction: getValidFraction(classification),
+        class: tileClassification.class,
+        waterFraction: tileClassification.waterFraction,
+        validFraction: getValidFraction(tileClassification),
         rectangleDegrees:
           rectangle != null ? rectangleToDegrees(rectangle) : undefined,
         summary: this.getDebugSummary()
@@ -588,25 +606,36 @@ export class WaterOccurrenceTilesPlugin {
     })
   }
 
+  private canApplyTileColor(): boolean {
+    return (
+      this.coloredClasses.size > 0 ||
+      this.minimumWaterFraction != null
+    )
+  }
+
   private applyTileMask(
     tile: Tile,
     scene = (tile as TileWithRegion).engineData?.scene,
-    classification = this.classifyTile(tile)
+    classification?: WaterOccurrenceClassification | null
   ): void {
     if (this.maskedTiles.has(tile)) {
       return
     }
-    if (
-      this.maskTexture == null ||
-      classification == null ||
-      !this.shouldMask(classification) ||
-      scene == null
-    ) {
+    if (this.maskTexture == null || scene == null) {
       return
     }
 
     const rectangle = this.getClassificationRectangle(tile)
-    if (rectangle == null || !this.shouldMaskRectangle(rectangle)) {
+    if (rectangle != null && !this.shouldMaskRectangle(rectangle)) {
+      return
+    }
+
+    const tileClassification =
+      classification ??
+      (this.maskAllIntersectingTiles
+        ? undefined
+        : this.classifyTile(tile))
+    if (!this.shouldMask(rectangle, tileClassification)) {
       return
     }
 
@@ -654,9 +683,12 @@ export class WaterOccurrenceTilesPlugin {
     }
     this.maskedTiles.add(tile)
     this.logDebug('tile mask set', {
-      class: classification.class,
-      waterFraction: classification.waterFraction,
-      validFraction: getValidFraction(classification),
+      class: tileClassification?.class,
+      waterFraction: tileClassification?.waterFraction,
+      validFraction:
+        tileClassification != null
+          ? getValidFraction(tileClassification)
+          : undefined,
       materialCount: maskedMaterialCount
     })
   }
@@ -974,6 +1006,16 @@ function getLongitudeOverlapWidth(
     overlap += Math.max(0, end - start)
   }
   return Math.min(overlap, getRectangleWidth(rasterRectangle))
+}
+
+function rectanglesOverlap(
+  rectangle: RectangleLike,
+  target: RectangleLike
+): boolean {
+  const latitudeOverlap =
+    Math.min(rectangle.north, target.north) -
+    Math.max(rectangle.south, target.south)
+  return latitudeOverlap > 0 && getLongitudeOverlapWidth(rectangle, target) > 0
 }
 
 function getRectangleWidth(rectangle: RectangleLike): number {

@@ -90,6 +90,7 @@ export const Manhattan: StoryFn = () => {
                 coloredClasses: [],
                 culledClasses: [],
                 maskedClasses: ['water', 'shoreline'],
+                maskAllIntersectingTiles: true,
                 maskTexture,
                 maskWaterThreshold: MAXAR_WATER_THRESHOLD / 255,
                 debug: false
