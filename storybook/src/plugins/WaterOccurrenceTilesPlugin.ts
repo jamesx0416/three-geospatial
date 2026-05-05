@@ -176,7 +176,6 @@ export class WaterOccurrenceTilesPlugin {
   private readonly classificationRectangles = new WeakMap<Tile, Rectangle>()
   private readonly rectangle = new Rectangle()
   private readonly coloredTiles = new WeakSet<Tile>()
-  private readonly maskedTiles = new WeakSet<Tile>()
   private readonly maskedMaterials = new WeakMap<Material, Material>()
   private readonly cullableTiles = new WeakMap<Tile, boolean>()
   private debugLogCount = 0
@@ -623,9 +622,6 @@ export class WaterOccurrenceTilesPlugin {
     scene = (tile as TileWithRegion).engineData?.scene,
     classification?: WaterOccurrenceClassification | null
   ): void {
-    if (this.maskedTiles.has(tile)) {
-      return
-    }
     if (this.maskTexture == null || scene == null) {
       return
     }
@@ -640,7 +636,10 @@ export class WaterOccurrenceTilesPlugin {
       (this.maskAllIntersectingTiles
         ? undefined
         : this.classifyTile(tile))
-    if (!this.shouldMask(rectangle, tileClassification)) {
+    if (
+      !this.maskAllIntersectingTiles &&
+      !this.shouldMask(rectangle, tileClassification)
+    ) {
       return
     }
 
@@ -686,7 +685,6 @@ export class WaterOccurrenceTilesPlugin {
     if (maskedMaterialCount === 0) {
       return
     }
-    this.maskedTiles.add(tile)
     this.logDebug('tile mask set', {
       class: tileClassification?.class,
       waterFraction: tileClassification?.waterFraction,
@@ -737,6 +735,10 @@ export class WaterOccurrenceTilesPlugin {
     const centerLon = Number.isFinite(center.lon) ? center.lon : 0
 
     const uvs = new Float32Array(position.count * 2)
+    let minU = Infinity
+    let minV = Infinity
+    let maxU = -Infinity
+    let maxV = -Infinity
     for (let i = 0; i < position.count; i += 1) {
       vectorScratch.fromBufferAttribute(position, i)
       vectorScratch.applyMatrix4(matrix)
@@ -761,10 +763,25 @@ export class WaterOccurrenceTilesPlugin {
         lat += Math.sign(centerLat - lat) * TWO_PI
       }
 
-      uvs[i * 2] =
+      const u =
         (unwrapLongitude(lon, maskRectangle.west) - maskRectangle.west) /
         maskRectangleWidth
-      uvs[i * 2 + 1] = (lat - maskRectangle.south) / maskRectangle.height
+      const v = (lat - maskRectangle.south) / maskRectangle.height
+      uvs[i * 2] = u
+      uvs[i * 2 + 1] = v
+      minU = Math.min(minU, u)
+      minV = Math.min(minV, v)
+      maxU = Math.max(maxU, u)
+      maxV = Math.max(maxV, v)
+    }
+    if (
+      !Number.isFinite(minU) ||
+      maxU < 0 ||
+      minU > 1 ||
+      maxV < 0 ||
+      minV > 1
+    ) {
+      return false
     }
     geometry.setAttribute('waterMaskUv', new BufferAttribute(uvs, 2))
     return true
@@ -791,6 +808,7 @@ export class WaterOccurrenceTilesPlugin {
       `${previousProgramCacheKey()}|water-mask-v2`
     maskedMaterial.needsUpdate = true
     this.maskedMaterials.set(material, maskedMaterial)
+    this.maskedMaterials.set(maskedMaterial, maskedMaterial)
     return maskedMaterial
   }
 

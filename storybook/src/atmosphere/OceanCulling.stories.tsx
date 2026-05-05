@@ -1,8 +1,11 @@
 import type { Meta, StoryFn } from '@storybook/react-vite'
+import { useFrame, useThree } from '@react-three/fiber'
 import { TilesPlugin } from '3d-tiles-renderer/r3f'
 import {
+  useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactElement
 } from 'react'
@@ -39,25 +42,37 @@ const MAXAR_WATER_PROBABILITY_RECTANGLE = new Rectangle(
 const MAXAR_LAND_THRESHOLD = 0
 const MAXAR_WATER_THRESHOLD = 90
 const MAXAR_OVERLAY_SEGMENTS = 96
-const MAXAR_MASK_TEXTURE_SIZE = 2048
-const MAXAR_FAR_MASK_TEXTURE_SIZE = 2048
 const MAXAR_FAR_MASK_ALTITUDE = 120
-const MAXAR_FAR_MASK_COLOR = [238, 232, 225] as const
 const MAXAR_FAR_MASK_ALPHA = 245
+const MAXAR_MASK_TEXTURE_SIZES = [512, 1024, 2048] as const
+const MAXAR_FAR_MASK_COLORS: Readonly<Record<MaxarMaskTextureSize, number>> = {
+  512: 0x4e8cff,
+  1024: 0xffba49,
+  2048: 0x3fd284
+}
+const MAXAR_MASK_CAMERA_DISTANCE_TIERS: readonly MaxarMaskCameraDistanceTier[] = [
+  { maximumCameraDistance: 18000, textureSize: 2048 },
+  { maximumCameraDistance: 40000, textureSize: 1024 },
+  { maximumCameraDistance: Infinity, textureSize: 512 }
+]
 
 let maxarWaterClassifierPromise:
   | Promise<WaterOccurrenceTileClassifier>
   | undefined
 let maxarRasterImagePromise: Promise<MaxarRasterImage> | undefined
-let maxarMaskTexturePromise: Promise<CanvasTexture> | undefined
-let maxarFarMaskTexturePromise: Promise<CanvasTexture> | undefined
+
+type MaxarMaskTextureSize = (typeof MAXAR_MASK_TEXTURE_SIZES)[number]
+
+interface MaxarMaskCameraDistanceTier {
+  readonly maximumCameraDistance: number
+  readonly textureSize: MaxarMaskTextureSize
+}
 
 interface MaxarRasterImage {
   readonly width: number
   readonly height: number
   readonly classificationData: Uint8Array
-  readonly maskCanvas: HTMLCanvasElement
-  readonly farMaskCanvas: HTMLCanvasElement
+  readonly maskCanvases: Map<MaxarMaskTextureSize, HTMLCanvasElement>
 }
 
 export default {
@@ -68,9 +83,6 @@ export default {
 } satisfies Meta
 
 export const Manhattan: StoryFn = () => {
-  const classifier = useMaxarManhattanWaterClassifier()
-  const maskTexture = useMaxarWaterMaskTexture()
-
   return (
     <Story
       longitude={-73.9709}
@@ -84,29 +96,43 @@ export const Manhattan: StoryFn = () => {
       globeChildren={
         <>
           <MaxarFarWaterMaskOverlay />
-          {classifier != null && maskTexture != null && (
-            <TilesPlugin
-              plugin={WaterOccurrenceTilesPlugin}
-              args={{
-                classifier,
-                coloredClasses: [],
-                culledClasses: [],
-                maskedClasses: ['water', 'shoreline'],
-                maskAllIntersectingTiles: true,
-                maskTexture,
-                maskWaterThreshold: MAXAR_WATER_THRESHOLD / 255,
-                debug: false
-              }}
-            />
-          )}
+          <MaxarWaterMaskTilesPlugin />
         </>
       }
     />
   )
 }
 
+function MaxarWaterMaskTilesPlugin(): ReactElement | null {
+  const classifier = useMaxarManhattanWaterClassifier()
+  const maskTexture = useMaxarWaterMaskTexture()
+  const args = useMemo(
+    () =>
+      classifier != null && maskTexture != null
+        ? {
+            classifier,
+            coloredClasses: [],
+            culledClasses: [],
+            maskedClasses: ['water', 'shoreline'],
+            maskAllIntersectingTiles: true,
+            maskTexture,
+            maskWaterThreshold: MAXAR_WATER_THRESHOLD / 255,
+            debug: false
+          }
+        : undefined,
+    [classifier, maskTexture]
+  )
+
+  if (args == null) {
+    return null
+  }
+
+  return <TilesPlugin plugin={WaterOccurrenceTilesPlugin} args={args} />
+}
+
 function MaxarFarWaterMaskOverlay(): ReactElement | null {
-  const texture = useMaxarFarWaterMaskTexture()
+  const textureSize = useMaxarMaskTextureSize()
+  const texture = useMaxarTexture(getMaxarFarMaskCanvas, LinearFilter, textureSize)
   const geometry = useMemo(
     () =>
       createRectangleOverlayGeometry(
@@ -131,6 +157,8 @@ function MaxarFarWaterMaskOverlay(): ReactElement | null {
   return (
     <mesh geometry={geometry} renderOrder={999}>
       <meshBasicMaterial
+        key={textureSize}
+        color={MAXAR_FAR_MASK_COLORS[textureSize]}
         map={texture}
         transparent
         depthTest={false}
@@ -142,46 +170,98 @@ function MaxarFarWaterMaskOverlay(): ReactElement | null {
   )
 }
 
-function useMaxarFarWaterMaskTexture(): CanvasTexture | undefined {
-  const [texture, setTexture] = useState<CanvasTexture>()
-
-  useEffect(() => {
-    let disposed = false
-    loadMaxarFarWaterMaskTexture(MAXAR_WATER_PROBABILITY_PATH)
-      .then(texture => {
-        if (!disposed) {
-          setTexture(texture)
-        }
-      })
-      .catch((error: unknown) => {
-        console.error(error)
-      })
-    return () => {
-      disposed = true
-    }
-  }, [])
-
-  return texture
+function useMaxarWaterMaskTexture(): CanvasTexture | undefined {
+  const textureSize = useMaxarMaskTextureSize()
+  return useMaxarTexture(getMaxarMaskCanvas, NearestFilter, textureSize)
 }
 
-function useMaxarWaterMaskTexture(): CanvasTexture | undefined {
+function useMaxarMaskTextureSize(): MaxarMaskTextureSize {
+  const camera = useThree(({ camera }) => camera)
+  const geodetic = useMemo(() => new Geodetic(), [])
+  const nearestPosition = useMemo(() => new Vector3(), [])
+  const [textureSize, setTextureSize] =
+    useState<MaxarMaskTextureSize>(() =>
+      getMaxarMaskTextureSize(camera.position, geodetic, nearestPosition)
+    )
+  const textureSizeRef = useRef(textureSize)
+
+  useFrame(() => {
+    const nextTextureSize = getMaxarMaskTextureSize(
+      camera.position,
+      geodetic,
+      nearestPosition
+    )
+    if (textureSizeRef.current === nextTextureSize) {
+      return
+    }
+    textureSizeRef.current = nextTextureSize
+    setTextureSize(nextTextureSize)
+  })
+
+  return textureSize
+}
+
+function useMaxarTexture(
+  getCanvas: (
+    image: MaxarRasterImage,
+    textureSize: MaxarMaskTextureSize
+  ) => HTMLCanvasElement,
+  magFilter: typeof LinearFilter | typeof NearestFilter,
+  textureSize: MaxarMaskTextureSize
+): CanvasTexture | undefined {
+  const invalidate = useThree(({ invalidate }) => invalidate)
   const [texture, setTexture] = useState<CanvasTexture>()
+  const textureRef = useRef<CanvasTexture>()
+  const imageRef = useRef<MaxarRasterImage>()
+  const textureSizeRef = useRef<MaxarMaskTextureSize>()
+
+  const updateTextureImage = useCallback((textureSize: MaxarMaskTextureSize) => {
+    textureSizeRef.current = textureSize
+    const texture = textureRef.current
+    const image = imageRef.current
+    if (texture == null || image == null) {
+      return
+    }
+    texture.image = getCanvas(image, textureSize)
+    texture.needsUpdate = true
+    invalidate()
+  }, [getCanvas, invalidate])
+
+  useEffect(() => {
+    updateTextureImage(textureSize)
+  }, [textureSize, updateTextureImage])
 
   useEffect(() => {
     let disposed = false
-    loadMaxarWaterMaskTexture(MAXAR_WATER_PROBABILITY_PATH)
-      .then(texture => {
-        if (!disposed) {
-          setTexture(texture)
+    loadMaxarRasterImage(MAXAR_WATER_PROBABILITY_PATH)
+      .then(image => {
+        if (disposed) {
+          return
         }
+        imageRef.current = image
+        const initialTextureSize =
+          textureSizeRef.current ?? MAXAR_MASK_TEXTURE_SIZES[0]
+        const texture = new CanvasTexture(getCanvas(image, initialTextureSize))
+        texture.flipY = true
+        texture.generateMipmaps = true
+        texture.minFilter = LinearMipmapLinearFilter
+        texture.magFilter = magFilter
+        texture.needsUpdate = true
+        textureRef.current = texture
+        textureSizeRef.current = initialTextureSize
+        setTexture(texture)
+        invalidate()
       })
       .catch((error: unknown) => {
         console.error(error)
       })
     return () => {
       disposed = true
+      textureRef.current?.dispose()
+      textureRef.current = undefined
+      imageRef.current = undefined
     }
-  }, [])
+  }, [getCanvas, invalidate, magFilter])
 
   return texture
 }
@@ -270,45 +350,91 @@ async function loadMaxarRasterImageUncached(
     width,
     height,
     classificationData,
-    maskCanvas: createMaxarMaskCanvas(classificationData, width, height),
-    farMaskCanvas: createMaxarFarMaskCanvas(classificationData, width, height)
+    maskCanvases: new Map()
   }
 }
 
-async function loadMaxarFarWaterMaskTexture(
-  path: string
-): Promise<CanvasTexture> {
-  maxarFarMaskTexturePromise ??= loadMaxarRasterImage(path).then(image => {
-    const texture = new CanvasTexture(image.farMaskCanvas)
-    texture.flipY = true
-    texture.generateMipmaps = true
-    texture.minFilter = LinearMipmapLinearFilter
-    texture.magFilter = LinearFilter
-    texture.needsUpdate = true
-    return texture
-  })
-  return await maxarFarMaskTexturePromise
+function getMaxarMaskCanvas(
+  image: MaxarRasterImage,
+  textureSize: MaxarMaskTextureSize
+): HTMLCanvasElement {
+  let canvas = image.maskCanvases.get(textureSize)
+  if (canvas == null) {
+    canvas = createMaxarMaskCanvas(
+      image.classificationData,
+      image.width,
+      image.height,
+      textureSize
+    )
+    image.maskCanvases.set(textureSize, canvas)
+  }
+  return canvas
 }
 
-async function loadMaxarWaterMaskTexture(path: string): Promise<CanvasTexture> {
-  maxarMaskTexturePromise ??= loadMaxarRasterImage(path).then(image => {
-    const texture = new CanvasTexture(image.maskCanvas)
-    texture.flipY = true
-    texture.generateMipmaps = true
-    texture.minFilter = LinearMipmapLinearFilter
-    texture.magFilter = NearestFilter
-    texture.needsUpdate = true
-    return texture
-  })
-  return await maxarMaskTexturePromise
+function getMaxarFarMaskCanvas(
+  image: MaxarRasterImage,
+  textureSize: MaxarMaskTextureSize
+): HTMLCanvasElement {
+  return createMaxarFarMaskCanvas(
+    image.classificationData,
+    image.width,
+    image.height,
+    textureSize
+  )
+}
+
+function getMaxarMaskTextureSize(
+  position: Vector3,
+  geodetic: Geodetic,
+  nearestPosition: Vector3
+): MaxarMaskTextureSize {
+  const distance = getMaxarCameraDistance(position, geodetic, nearestPosition)
+  for (const tier of MAXAR_MASK_CAMERA_DISTANCE_TIERS) {
+    if (distance <= tier.maximumCameraDistance) {
+      return tier.textureSize
+    }
+  }
+  return MAXAR_MASK_TEXTURE_SIZES[0]
+}
+
+function getMaxarCameraDistance(
+  position: Vector3,
+  geodetic: Geodetic,
+  nearestPosition: Vector3
+): number {
+  if (position.lengthSq() === 0) {
+    return Infinity
+  }
+  try {
+    geodetic.setFromECEF(position)
+  } catch {
+    return Infinity
+  }
+  const longitude = clamp(
+    geodetic.longitude,
+    MAXAR_WATER_PROBABILITY_RECTANGLE.west,
+    MAXAR_WATER_PROBABILITY_RECTANGLE.east
+  )
+  const latitude = clamp(
+    geodetic.latitude,
+    MAXAR_WATER_PROBABILITY_RECTANGLE.south,
+    MAXAR_WATER_PROBABILITY_RECTANGLE.north
+  )
+  geodetic.set(longitude, latitude, 0).toECEF(nearestPosition)
+  return position.distanceTo(nearestPosition)
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max)
 }
 
 function createMaxarMaskCanvas(
   data: Uint8Array,
   width: number,
-  height: number
+  height: number,
+  textureSize: MaxarMaskTextureSize
 ): HTMLCanvasElement {
-  const scale = Math.min(1, MAXAR_MASK_TEXTURE_SIZE / Math.max(width, height))
+  const scale = Math.min(1, textureSize / Math.max(width, height))
   const maskWidth = Math.max(1, Math.round(width * scale))
   const maskHeight = Math.max(1, Math.round(height * scale))
   const canvas = document.createElement('canvas')
@@ -340,9 +466,10 @@ function createMaxarMaskCanvas(
 function createMaxarFarMaskCanvas(
   data: Uint8Array,
   width: number,
-  height: number
+  height: number,
+  textureSize: MaxarMaskTextureSize
 ): HTMLCanvasElement {
-  const scale = Math.min(1, MAXAR_FAR_MASK_TEXTURE_SIZE / Math.max(width, height))
+  const scale = Math.min(1, textureSize / Math.max(width, height))
   const maskWidth = Math.max(1, Math.round(width * scale))
   const maskHeight = Math.max(1, Math.round(height * scale))
   const canvas = document.createElement('canvas')
@@ -362,9 +489,9 @@ function createMaxarFarMaskCanvas(
       const value = data[sourceY * width + sourceX]
       const targetIndex = (y * maskWidth + x) * 4
       if (value !== 255 && value >= MAXAR_WATER_THRESHOLD) {
-        target[targetIndex] = MAXAR_FAR_MASK_COLOR[0]
-        target[targetIndex + 1] = MAXAR_FAR_MASK_COLOR[1]
-        target[targetIndex + 2] = MAXAR_FAR_MASK_COLOR[2]
+        target[targetIndex] = 255
+        target[targetIndex + 1] = 255
+        target[targetIndex + 2] = 255
         target[targetIndex + 3] = MAXAR_FAR_MASK_ALPHA
       }
     }
