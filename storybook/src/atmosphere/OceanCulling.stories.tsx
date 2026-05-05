@@ -13,7 +13,6 @@ import {
   BufferGeometry,
   CanvasTexture,
   DoubleSide,
-  LinearFilter,
   Float32BufferAttribute,
   LinearMipmapLinearFilter,
   NearestFilter,
@@ -68,6 +67,13 @@ interface MaxarMaskCameraDistanceTier {
   readonly textureSize: MaxarMaskTextureSize
 }
 
+interface MaxarTextureOptions {
+  readonly generateMipmaps: boolean
+  readonly minFilter: CanvasTexture['minFilter']
+  readonly magFilter: CanvasTexture['magFilter']
+  readonly textureSize: MaxarMaskTextureSize
+}
+
 interface MaxarRasterImage {
   readonly width: number
   readonly height: number
@@ -94,18 +100,31 @@ export const Manhattan: StoryFn = () => {
       dayOfYear={1}
       timeOfDay={7.6}
       globeChildren={
-        <>
-          <MaxarFarWaterMaskOverlay />
-          <MaxarWaterMaskTilesPlugin />
-        </>
+        <MaxarOceanCulling />
       }
     />
   )
 }
 
-function MaxarWaterMaskTilesPlugin(): ReactElement | null {
+function MaxarOceanCulling(): ReactElement {
+  const textureSize = useMaxarMaskTextureSize()
+  return (
+    <>
+      <MaxarFarWaterMaskOverlay textureSize={textureSize} />
+      <MaxarWaterMaskTilesPlugin textureSize={textureSize} />
+    </>
+  )
+}
+
+interface MaxarMaskTextureSizeProps {
+  readonly textureSize: MaxarMaskTextureSize
+}
+
+function MaxarWaterMaskTilesPlugin({
+  textureSize
+}: MaxarMaskTextureSizeProps): ReactElement | null {
   const classifier = useMaxarManhattanWaterClassifier()
-  const maskTexture = useMaxarWaterMaskTexture()
+  const maskTexture = useMaxarWaterMaskTexture(textureSize)
   const args = useMemo(
     () =>
       classifier != null && maskTexture != null
@@ -130,9 +149,15 @@ function MaxarWaterMaskTilesPlugin(): ReactElement | null {
   return <TilesPlugin plugin={WaterOccurrenceTilesPlugin} args={args} />
 }
 
-function MaxarFarWaterMaskOverlay(): ReactElement | null {
-  const textureSize = useMaxarMaskTextureSize()
-  const texture = useMaxarTexture(getMaxarFarMaskCanvas, LinearFilter, textureSize)
+function MaxarFarWaterMaskOverlay({
+  textureSize
+}: MaxarMaskTextureSizeProps): ReactElement | null {
+  const texture = useMaxarTexture(getMaxarFarMaskCanvas, {
+    generateMipmaps: false,
+    minFilter: NearestFilter,
+    magFilter: NearestFilter,
+    textureSize
+  })
   const geometry = useMemo(
     () =>
       createRectangleOverlayGeometry(
@@ -170,9 +195,15 @@ function MaxarFarWaterMaskOverlay(): ReactElement | null {
   )
 }
 
-function useMaxarWaterMaskTexture(): CanvasTexture | undefined {
-  const textureSize = useMaxarMaskTextureSize()
-  return useMaxarTexture(getMaxarMaskCanvas, NearestFilter, textureSize)
+function useMaxarWaterMaskTexture(
+  textureSize: MaxarMaskTextureSize
+): CanvasTexture | undefined {
+  return useMaxarTexture(getMaxarMaskCanvas, {
+    generateMipmaps: true,
+    minFilter: LinearMipmapLinearFilter,
+    magFilter: NearestFilter,
+    textureSize
+  })
 }
 
 function useMaxarMaskTextureSize(): MaxarMaskTextureSize {
@@ -206,26 +237,32 @@ function useMaxarTexture(
     image: MaxarRasterImage,
     textureSize: MaxarMaskTextureSize
   ) => HTMLCanvasElement,
-  magFilter: typeof LinearFilter | typeof NearestFilter,
-  textureSize: MaxarMaskTextureSize
+  options: MaxarTextureOptions
 ): CanvasTexture | undefined {
+  const { generateMipmaps, minFilter, magFilter, textureSize } = options
   const invalidate = useThree(({ invalidate }) => invalidate)
   const [texture, setTexture] = useState<CanvasTexture>()
-  const textureRef = useRef<CanvasTexture>()
-  const imageRef = useRef<MaxarRasterImage>()
-  const textureSizeRef = useRef<MaxarMaskTextureSize>()
+  const textureRef = useRef<CanvasTexture | undefined>(undefined)
+  const imageRef = useRef<MaxarRasterImage | undefined>(undefined)
+  const textureSizeRef = useRef<MaxarMaskTextureSize | undefined>(undefined)
 
   const updateTextureImage = useCallback((textureSize: MaxarMaskTextureSize) => {
     textureSizeRef.current = textureSize
-    const texture = textureRef.current
     const image = imageRef.current
-    if (texture == null || image == null) {
+    if (image == null) {
       return
     }
-    texture.image = getCanvas(image, textureSize)
+    const texture = new CanvasTexture(getCanvas(image, textureSize))
+    texture.flipY = true
+    texture.generateMipmaps = generateMipmaps
+    texture.minFilter = minFilter
+    texture.magFilter = magFilter
     texture.needsUpdate = true
+    textureRef.current?.dispose()
+    textureRef.current = texture
+    setTexture(texture)
     invalidate()
-  }, [getCanvas, invalidate])
+  }, [generateMipmaps, getCanvas, invalidate, magFilter, minFilter])
 
   useEffect(() => {
     updateTextureImage(textureSize)
@@ -241,16 +278,8 @@ function useMaxarTexture(
         imageRef.current = image
         const initialTextureSize =
           textureSizeRef.current ?? MAXAR_MASK_TEXTURE_SIZES[0]
-        const texture = new CanvasTexture(getCanvas(image, initialTextureSize))
-        texture.flipY = true
-        texture.generateMipmaps = true
-        texture.minFilter = LinearMipmapLinearFilter
-        texture.magFilter = magFilter
-        texture.needsUpdate = true
-        textureRef.current = texture
         textureSizeRef.current = initialTextureSize
-        setTexture(texture)
-        invalidate()
+        updateTextureImage(initialTextureSize)
       })
       .catch((error: unknown) => {
         console.error(error)
@@ -261,7 +290,7 @@ function useMaxarTexture(
       textureRef.current = undefined
       imageRef.current = undefined
     }
-  }, [getCanvas, invalidate, magFilter])
+  }, [updateTextureImage])
 
   return texture
 }

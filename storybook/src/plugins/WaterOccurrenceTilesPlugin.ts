@@ -8,13 +8,13 @@ import {
 import type { Tile, TilesRenderer } from '3d-tiles-renderer'
 import {
   Box3,
-  BufferAttribute,
   type BufferGeometry,
   Color,
   Matrix4,
   Sphere,
   type Texture,
   Vector3,
+  Vector4,
   type Material,
   type Object3D
 } from 'three'
@@ -100,11 +100,16 @@ const boxScratch = /*#__PURE__*/ new Box3()
 const matrixScratch = /*#__PURE__*/ new Matrix4()
 const waterMaskMatrixScratch = /*#__PURE__*/ new Matrix4()
 const waterMaskCenterScratch = /*#__PURE__*/ new Vector3()
+const waterMaskRectangleScratch = /*#__PURE__*/ new Vector4()
 const sphereScratch = /*#__PURE__*/ new Sphere()
 const vectorScratch = /*#__PURE__*/ new Vector3()
 const cartographicScratch: CartographicLike = { lat: 0, lon: 0, height: 0 }
 const TWO_PI = Math.PI * 2
 const RADIANS_TO_DEGREES = 180 / Math.PI
+const WGS84_A = 6378137
+const WGS84_B = 6356752.3142451793
+const WGS84_E2 = 6.6943799901413165e-3
+const WGS84_EP2 = 6.739496742276434e-3
 const TILE_COLOR = /*#__PURE__*/ new Color(0xff0000)
 
 export interface WaterOccurrenceTilesPluginOptions {
@@ -176,7 +181,13 @@ export class WaterOccurrenceTilesPlugin {
   private readonly classificationRectangles = new WeakMap<Tile, Rectangle>()
   private readonly rectangle = new Rectangle()
   private readonly coloredTiles = new WeakSet<Tile>()
-  private readonly maskedMaterials = new WeakMap<Material, Material>()
+  private readonly maskedMaterials = new WeakSet<Material>()
+  private readonly maskedMaterialMatrices = new WeakMap<Material, Matrix4>()
+  private readonly originalMaterials = new WeakMap<
+    Object3DWithMaterial,
+    Material | Material[]
+  >()
+  private readonly modifiedObjects = new Set<Object3DWithMaterial>()
   private readonly cullableTiles = new WeakMap<Tile, boolean>()
   private debugLogCount = 0
   private colorSetLogCount = 0
@@ -360,6 +371,7 @@ export class WaterOccurrenceTilesPlugin {
   // Plugin method
   dispose(): void {
     this.logDebug('dispose')
+    this.restoreModifiedMaterials()
     this.tiles = undefined
     this.classifications = new WeakMap()
   }
@@ -593,9 +605,10 @@ export class WaterOccurrenceTilesPlugin {
         materialCount++
         return coloredMaterial
       })
-      objectWithMaterial.material = Array.isArray(material)
-        ? coloredMaterials
-        : coloredMaterials[0]
+      this.setObjectMaterial(
+        objectWithMaterial,
+        Array.isArray(material) ? coloredMaterials : coloredMaterials[0]
+      )
     })
 
     this.coloredTiles.add(tile)
@@ -663,7 +676,7 @@ export class WaterOccurrenceTilesPlugin {
         waterMaskMatrixScratch.premultiply(tiles.group.matrixWorldInverse)
       }
       if (
-        !this.setWaterMaskUvAttribute(
+        !this.hasWaterMaskUvCoverage(
           geometry,
           waterMaskMatrixScratch,
           ellipsoid
@@ -675,11 +688,12 @@ export class WaterOccurrenceTilesPlugin {
       const materials = Array.isArray(material) ? material : [material]
       const maskedMaterials = materials.map(material => {
         maskedMaterialCount++
-        return this.getMaskedMaterial(material)
+        return this.getMaskedMaterial(material, waterMaskMatrixScratch)
       })
-      mesh.material = Array.isArray(material)
-        ? maskedMaterials
-        : maskedMaterials[0]
+      this.setObjectMaterial(
+        mesh,
+        Array.isArray(material) ? maskedMaterials : maskedMaterials[0]
+      )
     })
 
     if (maskedMaterialCount === 0) {
@@ -696,7 +710,7 @@ export class WaterOccurrenceTilesPlugin {
     })
   }
 
-  private setWaterMaskUvAttribute(
+  private hasWaterMaskUvCoverage(
     geometry: BufferGeometry,
     matrix: Matrix4,
     ellipsoid: EllipsoidLike
@@ -734,7 +748,6 @@ export class WaterOccurrenceTilesPlugin {
     const centerLat = Number.isFinite(center.lat) ? center.lat : 0
     const centerLon = Number.isFinite(center.lon) ? center.lon : 0
 
-    const uvs = new Float32Array(position.count * 2)
     let minU = Infinity
     let minV = Infinity
     let maxU = -Infinity
@@ -749,8 +762,6 @@ export class WaterOccurrenceTilesPlugin {
 
       let { lon, lat } = cartographic
       if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
-        uvs[i * 2] = -1
-        uvs[i * 2 + 1] = -1
         continue
       }
       if (Math.abs(Math.abs(lat) - Math.PI / 2) < 1e-5) {
@@ -767,8 +778,6 @@ export class WaterOccurrenceTilesPlugin {
         (unwrapLongitude(lon, maskRectangle.west) - maskRectangle.west) /
         maskRectangleWidth
       const v = (lat - maskRectangle.south) / maskRectangle.height
-      uvs[i * 2] = u
-      uvs[i * 2 + 1] = v
       minU = Math.min(minU, u)
       minV = Math.min(minV, v)
       maxU = Math.max(maxU, u)
@@ -783,17 +792,20 @@ export class WaterOccurrenceTilesPlugin {
     ) {
       return false
     }
-    geometry.setAttribute('waterMaskUv', new BufferAttribute(uvs, 2))
     return true
   }
 
-  private getMaskedMaterial(material: Material): Material {
-    const cached = this.maskedMaterials.get(material)
-    if (cached != null) {
-      return cached
+  private getMaskedMaterial(
+    material: Material,
+    modelToECEFMatrix: Matrix4
+  ): Material {
+    if (this.maskedMaterials.has(material)) {
+      this.maskedMaterialMatrices.get(material)?.copy(modelToECEFMatrix)
+      return material
     }
 
     const maskedMaterial = material.clone()
+    const waterMaskModelToECEFMatrix = modelToECEFMatrix.clone()
     const previousOnBeforeCompile = maskedMaterial.onBeforeCompile.bind(
       maskedMaterial
     )
@@ -802,17 +814,44 @@ export class WaterOccurrenceTilesPlugin {
 
     maskedMaterial.onBeforeCompile = (shader, renderer): void => {
       previousOnBeforeCompile(shader, renderer)
-      this.patchWaterMaskShader(shader)
+      this.patchWaterMaskShader(shader, waterMaskModelToECEFMatrix)
     }
     maskedMaterial.customProgramCacheKey = (): string =>
-      `${previousProgramCacheKey()}|water-mask-v2`
+      `${previousProgramCacheKey()}|water-mask-v3`
     maskedMaterial.needsUpdate = true
-    this.maskedMaterials.set(material, maskedMaterial)
-    this.maskedMaterials.set(maskedMaterial, maskedMaterial)
+    this.maskedMaterials.add(maskedMaterial)
+    this.maskedMaterialMatrices.set(
+      maskedMaterial,
+      waterMaskModelToECEFMatrix
+    )
     return maskedMaterial
   }
 
-  private patchWaterMaskShader(shader: WaterMaskShader): void {
+  private setObjectMaterial(
+    object: Object3DWithMaterial,
+    material: Material | Material[]
+  ): void {
+    if (!this.originalMaterials.has(object) && object.material != null) {
+      this.originalMaterials.set(object, object.material)
+      this.modifiedObjects.add(object)
+    }
+    object.material = material
+  }
+
+  private restoreModifiedMaterials(): void {
+    for (const object of this.modifiedObjects) {
+      const material = this.originalMaterials.get(object)
+      if (material != null) {
+        object.material = material
+      }
+    }
+    this.modifiedObjects.clear()
+  }
+
+  private patchWaterMaskShader(
+    shader: WaterMaskShader,
+    waterMaskModelToECEFMatrix: Matrix4
+  ): void {
     shader.uniforms.waterMaskTexture = { value: this.maskTexture }
     shader.uniforms.waterMaskWaterThreshold = {
       value: this.maskWaterThreshold
@@ -820,19 +859,31 @@ export class WaterOccurrenceTilesPlugin {
     shader.uniforms.waterMaskAlphaThreshold = {
       value: this.maskAlphaThreshold
     }
+    shader.uniforms.waterMaskModelToECEFMatrix = {
+      value: waterMaskModelToECEFMatrix
+    }
+    shader.uniforms.waterMaskRectangle = {
+      value: waterMaskRectangleScratch.clone().set(
+        this.maskRectangle.west,
+        this.maskRectangle.south,
+        getRectangleWidth(this.maskRectangle),
+        this.maskRectangle.height
+      )
+    }
     shader.vertexShader = shader.vertexShader.replace(
       '#include <common>',
       `
 #include <common>
-attribute vec2 waterMaskUv;
-varying vec2 vWaterMaskUv;
+uniform mat4 waterMaskModelToECEFMatrix;
+varying vec3 vWaterMaskPositionECEF;
 `
     )
     shader.vertexShader = shader.vertexShader.replace(
       '#include <begin_vertex>',
       `
 #include <begin_vertex>
-vWaterMaskUv = waterMaskUv;
+vWaterMaskPositionECEF =
+  (waterMaskModelToECEFMatrix * vec4(position, 1.0)).xyz;
 `
     )
     shader.fragmentShader = shader.fragmentShader.replace(
@@ -842,16 +893,61 @@ vWaterMaskUv = waterMaskUv;
 uniform sampler2D waterMaskTexture;
 uniform float waterMaskWaterThreshold;
 uniform float waterMaskAlphaThreshold;
-varying vec2 vWaterMaskUv;
+uniform vec4 waterMaskRectangle;
+varying vec3 vWaterMaskPositionECEF;
+
+const float WATER_MASK_TWO_PI = 6.283185307179586;
+const float WATER_MASK_WGS84_A = ${WGS84_A.toPrecision(17)};
+const float WATER_MASK_WGS84_B = ${WGS84_B.toPrecision(17)};
+const float WATER_MASK_WGS84_E2 = ${WGS84_E2.toPrecision(17)};
+const float WATER_MASK_WGS84_EP2 = ${WGS84_EP2.toPrecision(17)};
+
+float waterMaskUnwrapLongitude(float longitude, float origin) {
+  float unwrapped = longitude;
+  if (unwrapped < origin) {
+    unwrapped += WATER_MASK_TWO_PI;
+  }
+  if (unwrapped > origin + WATER_MASK_TWO_PI) {
+    unwrapped -= WATER_MASK_TWO_PI;
+  }
+  return unwrapped;
+}
+
+vec2 waterMaskUvFromECEF(vec3 positionECEF) {
+  float longitude = atan(positionECEF.y, positionECEF.x);
+  float xy = length(positionECEF.xy);
+  float theta = atan(
+    positionECEF.z * WATER_MASK_WGS84_A,
+    xy * WATER_MASK_WGS84_B
+  );
+  float sinTheta = sin(theta);
+  float cosTheta = cos(theta);
+  float latitude = atan(
+    positionECEF.z +
+      WATER_MASK_WGS84_EP2 * WATER_MASK_WGS84_B *
+      sinTheta * sinTheta * sinTheta,
+    xy -
+      WATER_MASK_WGS84_E2 * WATER_MASK_WGS84_A *
+      cosTheta * cosTheta * cosTheta
+  );
+  return vec2(
+    (
+      waterMaskUnwrapLongitude(longitude, waterMaskRectangle.x) -
+      waterMaskRectangle.x
+    ) / waterMaskRectangle.z,
+    (latitude - waterMaskRectangle.y) / waterMaskRectangle.w
+  );
+}
 `
     )
 
     const discardSnippet = `
+vec2 waterMaskUv = waterMaskUvFromECEF(vWaterMaskPositionECEF);
 if (
-  all(greaterThanEqual(vWaterMaskUv, vec2(0.0))) &&
-  all(lessThanEqual(vWaterMaskUv, vec2(1.0)))
+  all(greaterThanEqual(waterMaskUv, vec2(0.0))) &&
+  all(lessThanEqual(waterMaskUv, vec2(1.0)))
 ) {
-  vec4 waterMask = texture2D(waterMaskTexture, vWaterMaskUv);
+  vec4 waterMask = texture2D(waterMaskTexture, waterMaskUv);
   if (
     waterMask.r >= waterMaskWaterThreshold &&
     waterMask.a >= waterMaskAlphaThreshold
