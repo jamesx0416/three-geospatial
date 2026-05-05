@@ -44,6 +44,7 @@ const MAXAR_OVERLAY_SEGMENTS = 96
 const MAXAR_FAR_MASK_ALTITUDE = 120
 const MAXAR_FAR_MASK_ALPHA = 245
 const MAXAR_MASK_TEXTURE_SIZES = [512, 1024, 2048] as const
+const MAXAR_CANVAS_CACHE_LIMIT = 2
 const MAXAR_FAR_MASK_COLORS: Readonly<Record<MaxarMaskTextureSize, number>> = {
   512: 0x4e8cff,
   1024: 0xffba49,
@@ -59,6 +60,14 @@ let maxarWaterClassifierPromise:
   | Promise<WaterOccurrenceTileClassifier>
   | undefined
 let maxarRasterImagePromise: Promise<MaxarRasterImage> | undefined
+let maxarCanvasWorker: Worker | undefined
+let maxarCanvasWorkerRequestId = 0
+let maxarCanvasWorkerSourceId = 0
+const maxarCanvasWorkerSources = new Set<number>()
+const maxarCanvasWorkerRequests = new Map<
+  number,
+  (result: MaxarGeneratedCanvas) => void
+>()
 
 type MaxarMaskTextureSize = (typeof MAXAR_MASK_TEXTURE_SIZES)[number]
 
@@ -79,6 +88,14 @@ interface MaxarRasterImage {
   readonly height: number
   readonly classificationData: Uint8Array
   readonly maskCanvases: Map<MaxarMaskTextureSize, HTMLCanvasElement>
+  readonly farMaskCanvases: Map<MaxarMaskTextureSize, HTMLCanvasElement>
+  workerSourceId?: number
+}
+
+interface MaxarGeneratedCanvas {
+  readonly width: number
+  readonly height: number
+  readonly data: Uint8ClampedArray
 }
 
 export default {
@@ -152,12 +169,16 @@ function MaxarWaterMaskTilesPlugin({
 function MaxarFarWaterMaskOverlay({
   textureSize
 }: MaxarMaskTextureSizeProps): ReactElement | null {
-  const texture = useMaxarTexture(getMaxarFarMaskCanvas, {
-    generateMipmaps: false,
-    minFilter: NearestFilter,
-    magFilter: NearestFilter,
-    textureSize
-  })
+  const texture = useMaxarTexture(
+    getCachedMaxarFarMaskCanvas,
+    createAndCacheMaxarFarMaskCanvas,
+    {
+      generateMipmaps: false,
+      minFilter: NearestFilter,
+      magFilter: NearestFilter,
+      textureSize
+    }
+  )
   const geometry = useMemo(
     () =>
       createRectangleOverlayGeometry(
@@ -198,12 +219,16 @@ function MaxarFarWaterMaskOverlay({
 function useMaxarWaterMaskTexture(
   textureSize: MaxarMaskTextureSize
 ): CanvasTexture | undefined {
-  return useMaxarTexture(getMaxarMaskCanvas, {
-    generateMipmaps: true,
-    minFilter: LinearMipmapLinearFilter,
-    magFilter: NearestFilter,
-    textureSize
-  })
+  return useMaxarTexture(
+    getCachedMaxarMaskCanvas,
+    createAndCacheMaxarMaskCanvas,
+    {
+      generateMipmaps: true,
+      minFilter: LinearMipmapLinearFilter,
+      magFilter: NearestFilter,
+      textureSize
+    }
+  )
 }
 
 function useMaxarMaskTextureSize(): MaxarMaskTextureSize {
@@ -233,10 +258,14 @@ function useMaxarMaskTextureSize(): MaxarMaskTextureSize {
 }
 
 function useMaxarTexture(
-  getCanvas: (
+  getCachedCanvas: (
     image: MaxarRasterImage,
     textureSize: MaxarMaskTextureSize
-  ) => HTMLCanvasElement,
+  ) => HTMLCanvasElement | undefined,
+  createCanvas: (
+    image: MaxarRasterImage,
+    textureSize: MaxarMaskTextureSize
+  ) => Promise<HTMLCanvasElement>,
   options: MaxarTextureOptions
 ): CanvasTexture | undefined {
   const { generateMipmaps, minFilter, magFilter, textureSize } = options
@@ -245,14 +274,10 @@ function useMaxarTexture(
   const textureRef = useRef<CanvasTexture | undefined>(undefined)
   const imageRef = useRef<MaxarRasterImage | undefined>(undefined)
   const textureSizeRef = useRef<MaxarMaskTextureSize | undefined>(undefined)
+  const generationRef = useRef(0)
 
-  const updateTextureImage = useCallback((textureSize: MaxarMaskTextureSize) => {
-    textureSizeRef.current = textureSize
-    const image = imageRef.current
-    if (image == null) {
-      return
-    }
-    const texture = new CanvasTexture(getCanvas(image, textureSize))
+  const updateTextureCanvas = useCallback((canvas: HTMLCanvasElement) => {
+    const texture = new CanvasTexture(canvas)
     texture.flipY = true
     texture.generateMipmaps = generateMipmaps
     texture.minFilter = minFilter
@@ -262,7 +287,39 @@ function useMaxarTexture(
     textureRef.current = texture
     setTexture(texture)
     invalidate()
-  }, [generateMipmaps, getCanvas, invalidate, magFilter, minFilter])
+  }, [generateMipmaps, invalidate, magFilter, minFilter])
+
+  const updateTextureImage = useCallback((textureSize: MaxarMaskTextureSize) => {
+    textureSizeRef.current = textureSize
+    const image = imageRef.current
+    if (image == null) {
+      return
+    }
+
+    const cachedCanvas = getCachedCanvas(image, textureSize)
+    if (cachedCanvas != null) {
+      generationRef.current += 1
+      updateTextureCanvas(cachedCanvas)
+      return
+    }
+
+    const generation = generationRef.current + 1
+    generationRef.current = generation
+    scheduleIdle(() => {
+      createCanvas(image, textureSize)
+        .then(canvas => {
+          if (
+            generationRef.current === generation &&
+            textureSizeRef.current === textureSize
+          ) {
+            updateTextureCanvas(canvas)
+          }
+        })
+        .catch((error: unknown) => {
+          console.error(error)
+        })
+    })
+  }, [createCanvas, getCachedCanvas, updateTextureCanvas])
 
   useEffect(() => {
     updateTextureImage(textureSize)
@@ -379,37 +436,227 @@ async function loadMaxarRasterImageUncached(
     width,
     height,
     classificationData,
-    maskCanvases: new Map()
+    maskCanvases: new Map(),
+    farMaskCanvases: new Map()
   }
 }
 
-function getMaxarMaskCanvas(
+function getCachedMaxarMaskCanvas(
   image: MaxarRasterImage,
   textureSize: MaxarMaskTextureSize
-): HTMLCanvasElement {
-  let canvas = image.maskCanvases.get(textureSize)
-  if (canvas == null) {
-    canvas = createMaxarMaskCanvas(
-      image.classificationData,
-      image.width,
-      image.height,
-      textureSize
-    )
-    image.maskCanvases.set(textureSize, canvas)
+): HTMLCanvasElement | undefined {
+  return image.maskCanvases.get(textureSize)
+}
+
+function createAndCacheMaxarMaskCanvas(
+  image: MaxarRasterImage,
+  textureSize: MaxarMaskTextureSize
+): Promise<HTMLCanvasElement> {
+  return createMaxarCanvasInWorker(image, textureSize, false).then(canvas => {
+    cacheMaxarCanvas(image.maskCanvases, textureSize, canvas)
+    return canvas
+  })
+}
+
+function getCachedMaxarFarMaskCanvas(
+  image: MaxarRasterImage,
+  textureSize: MaxarMaskTextureSize
+): HTMLCanvasElement | undefined {
+  return image.farMaskCanvases.get(textureSize)
+}
+
+function createAndCacheMaxarFarMaskCanvas(
+  image: MaxarRasterImage,
+  textureSize: MaxarMaskTextureSize
+): Promise<HTMLCanvasElement> {
+  return createMaxarCanvasInWorker(image, textureSize, true).then(canvas => {
+    cacheMaxarCanvas(image.farMaskCanvases, textureSize, canvas)
+    return canvas
+  })
+}
+
+function cacheMaxarCanvas(
+  cache: Map<MaxarMaskTextureSize, HTMLCanvasElement>,
+  textureSize: MaxarMaskTextureSize,
+  canvas: HTMLCanvasElement
+): void {
+  cache.delete(textureSize)
+  cache.set(textureSize, canvas)
+  while (cache.size > MAXAR_CANVAS_CACHE_LIMIT) {
+    const oldestTextureSize = cache.keys().next().value
+    if (oldestTextureSize == null) {
+      return
+    }
+    cache.delete(oldestTextureSize)
   }
+}
+
+async function createMaxarCanvasInWorker(
+  image: MaxarRasterImage,
+  textureSize: MaxarMaskTextureSize,
+  farMask: boolean
+): Promise<HTMLCanvasElement> {
+  if (typeof Worker === 'undefined') {
+    return farMask
+      ? createMaxarFarMaskCanvas(
+          image.classificationData,
+          image.width,
+          image.height,
+          textureSize
+        )
+      : createMaxarMaskCanvas(
+          image.classificationData,
+          image.width,
+          image.height,
+          textureSize
+        )
+  }
+
+  const worker = getMaxarCanvasWorker()
+  const sourceId = getMaxarWorkerSourceId(image, worker)
+  const id = ++maxarCanvasWorkerRequestId
+  const result = await new Promise<MaxarGeneratedCanvas>(resolve => {
+    maxarCanvasWorkerRequests.set(id, resolve)
+    worker.postMessage({
+      id,
+      sourceId,
+      width: image.width,
+      height: image.height,
+      textureSize,
+      farMask,
+      waterThreshold: MAXAR_WATER_THRESHOLD,
+      farMaskAlpha: MAXAR_FAR_MASK_ALPHA
+    })
+  })
+  const canvas = document.createElement('canvas')
+  canvas.width = result.width
+  canvas.height = result.height
+  const context = canvas.getContext('2d')
+  if (context == null) {
+    throw new Error('Failed to create canvas context')
+  }
+  context.putImageData(
+    new ImageData(
+      new Uint8ClampedArray(result.data),
+      result.width,
+      result.height
+    ),
+    0,
+    0
+  )
   return canvas
 }
 
-function getMaxarFarMaskCanvas(
+function getMaxarWorkerSourceId(
   image: MaxarRasterImage,
-  textureSize: MaxarMaskTextureSize
-): HTMLCanvasElement {
-  return createMaxarFarMaskCanvas(
-    image.classificationData,
-    image.width,
-    image.height,
-    textureSize
-  )
+  worker: Worker
+): number {
+  image.workerSourceId ??= ++maxarCanvasWorkerSourceId
+  if (!maxarCanvasWorkerSources.has(image.workerSourceId)) {
+    maxarCanvasWorkerSources.add(image.workerSourceId)
+    const dataBuffer = image.classificationData.slice().buffer
+    worker.postMessage({
+      type: 'source',
+      sourceId: image.workerSourceId,
+      data: dataBuffer
+    }, [dataBuffer])
+  }
+  return image.workerSourceId
+}
+
+function getMaxarCanvasWorker(): Worker {
+  if (maxarCanvasWorker != null) {
+    return maxarCanvasWorker
+  }
+  const worker = new Worker(URL.createObjectURL(new Blob([`
+const sources = new Map()
+self.onmessage = event => {
+  if (event.data.type === 'source') {
+    sources.set(event.data.sourceId, new Uint8Array(event.data.data))
+    return
+  }
+  const {
+    id,
+    sourceId,
+    width,
+    height,
+    textureSize,
+    farMask,
+    waterThreshold,
+    farMaskAlpha
+  } = event.data
+  const source = sources.get(sourceId)
+  if (source == null) {
+    throw new Error('Missing Maxar source data')
+  }
+  const scale = Math.min(1, textureSize / Math.max(width, height))
+  const maskWidth = Math.max(1, Math.round(width * scale))
+  const maskHeight = Math.max(1, Math.round(height * scale))
+  const target = new Uint8ClampedArray(maskWidth * maskHeight * 4)
+  for (let y = 0; y < maskHeight; y += 1) {
+    const sourceYStart = Math.floor(y / scale)
+    const sourceYEnd = Math.min(Math.ceil((y + 1) / scale), height)
+    for (let x = 0; x < maskWidth; x += 1) {
+      const sourceXStart = Math.floor(x / scale)
+      const sourceXEnd = Math.min(Math.ceil((x + 1) / scale), width)
+      let value = -1
+      for (let sourceY = sourceYStart; sourceY < sourceYEnd; sourceY += 1) {
+        const sourceRowIndex = sourceY * width
+        for (
+          let sourceX = sourceXStart;
+          sourceX < sourceXEnd;
+          sourceX += 1
+        ) {
+          const sourceValue = source[sourceRowIndex + sourceX]
+          if (sourceValue !== 255) {
+            value = Math.max(value, sourceValue)
+          }
+        }
+      }
+      const targetIndex = (y * maskWidth + x) * 4
+      if (farMask) {
+        if (value >= waterThreshold) {
+          target[targetIndex] = 255
+          target[targetIndex + 1] = 255
+          target[targetIndex + 2] = 255
+          target[targetIndex + 3] = farMaskAlpha
+        }
+      } else if (value >= 0) {
+        target[targetIndex] = value
+        target[targetIndex + 3] = 255
+      }
+    }
+  }
+  self.postMessage({ id, width: maskWidth, height: maskHeight, data: target }, [
+    target.buffer
+  ])
+}
+`], { type: 'text/javascript' })))
+  worker.onmessage = (
+    event: MessageEvent<MaxarGeneratedCanvas & { readonly id: number }>
+  ) => {
+    const { id, ...result } = event.data
+    const resolve = maxarCanvasWorkerRequests.get(id)
+    if (resolve != null) {
+      maxarCanvasWorkerRequests.delete(id)
+      resolve(result)
+    }
+  }
+  maxarCanvasWorker = worker
+  return worker
+}
+
+function scheduleIdle(callback: () => void): void {
+  const requestIdleCallback = (
+    window as Window & {
+      requestIdleCallback?: (callback: () => void) => number
+    }
+  ).requestIdleCallback
+  if (requestIdleCallback != null) {
+    requestIdleCallback(callback)
+  } else {
+    window.setTimeout(callback, 0)
+  }
 }
 
 function getMaxarMaskTextureSize(
@@ -477,12 +724,23 @@ function createMaxarMaskCanvas(
   const image = context.createImageData(maskWidth, maskHeight)
   const target = image.data
   for (let y = 0; y < maskHeight; y += 1) {
-    const sourceY = Math.min(Math.floor(y / scale), height - 1)
+    const sourceYStart = Math.floor(y / scale)
+    const sourceYEnd = Math.min(Math.ceil((y + 1) / scale), height)
     for (let x = 0; x < maskWidth; x += 1) {
-      const sourceX = Math.min(Math.floor(x / scale), width - 1)
-      const value = data[sourceY * width + sourceX]
+      const sourceXStart = Math.floor(x / scale)
+      const sourceXEnd = Math.min(Math.ceil((x + 1) / scale), width)
+      let value = -1
+      for (let sourceY = sourceYStart; sourceY < sourceYEnd; sourceY += 1) {
+        const sourceRowIndex = sourceY * width
+        for (let sourceX = sourceXStart; sourceX < sourceXEnd; sourceX += 1) {
+          const sourceValue = data[sourceRowIndex + sourceX]
+          if (sourceValue !== 255) {
+            value = Math.max(value, sourceValue)
+          }
+        }
+      }
       const targetIndex = (y * maskWidth + x) * 4
-      if (value !== 255) {
+      if (value >= 0) {
         target[targetIndex] = value
         target[targetIndex + 3] = 255
       }
@@ -512,12 +770,23 @@ function createMaxarFarMaskCanvas(
   const image = context.createImageData(maskWidth, maskHeight)
   const target = image.data
   for (let y = 0; y < maskHeight; y += 1) {
-    const sourceY = Math.min(Math.floor(y / scale), height - 1)
+    const sourceYStart = Math.floor(y / scale)
+    const sourceYEnd = Math.min(Math.ceil((y + 1) / scale), height)
     for (let x = 0; x < maskWidth; x += 1) {
-      const sourceX = Math.min(Math.floor(x / scale), width - 1)
-      const value = data[sourceY * width + sourceX]
+      const sourceXStart = Math.floor(x / scale)
+      const sourceXEnd = Math.min(Math.ceil((x + 1) / scale), width)
+      let value = -1
+      for (let sourceY = sourceYStart; sourceY < sourceYEnd; sourceY += 1) {
+        const sourceRowIndex = sourceY * width
+        for (let sourceX = sourceXStart; sourceX < sourceXEnd; sourceX += 1) {
+          const sourceValue = data[sourceRowIndex + sourceX]
+          if (sourceValue !== 255) {
+            value = Math.max(value, sourceValue)
+          }
+        }
+      }
       const targetIndex = (y * maskWidth + x) * 4
-      if (value !== 255 && value >= MAXAR_WATER_THRESHOLD) {
+      if (value >= MAXAR_WATER_THRESHOLD) {
         target[targetIndex] = 255
         target[targetIndex + 1] = 255
         target[targetIndex + 2] = 255
