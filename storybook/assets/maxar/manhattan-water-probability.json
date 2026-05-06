@@ -16,50 +16,54 @@
     "south": 4437998,
     "north": 4562000
   },
-  "width": 4096,
-  "height": 4096,
+  "width": 8192,
+  "height": 8192,
   "file": "storybook/assets/maxar/manhattan-water-probability.png",
-  "valid": 5358252,
+  "valid": 21432618,
   "waterThreshold": 90,
-  "water": 2107685,
+  "water": 8430298,
   "encoding": "0-100 is source water probability; 255 is no-data",
-  "resampling": "nearest-neighbour reprojection from EPSG:32618 into the lon/lat rectangle, mosaicked from overlapping source subtiles",
+  "resampling": "nearest-neighbour reprojection from EPSG:32618 into the lon/lat rectangle using piecewise 32-pixel projection segments, mosaicked from overlapping source subtiles",
   "sourceFiles": [
     {
       "file": "utm18n_46_05_1_1_prob_v1.0.tif",
+      "url": "https://arcticdata.io/data/10.18739/A2610VT7V/earthdem/earthdem_03_conus/utm18n_46_05_1_1/output/utm18n_46_05_1_1_prob_v1.0.tif",
       "originEasting": 538000,
       "originNorthing": 4562000,
       "pixelSize": 2,
       "width": 37001,
       "height": 37001,
-      "fillPixels": 1179029
+      "fillPixels": 4716348
     },
     {
       "file": "utm18n_46_05_1_2_prob_v1.0.tif",
+      "url": "https://arcticdata.io/data/10.18739/A2610VT7V/earthdem/earthdem_03_conus/utm18n_46_05_1_2/output/utm18n_46_05_1_2_prob_v1.0.tif",
       "originEasting": 588000,
       "originNorthing": 4562000,
       "pixelSize": 2,
       "width": 37001,
       "height": 37001,
-      "fillPixels": 2672597
+      "fillPixels": 10689668
     },
     {
       "file": "utm18n_45_05_2_1_prob_v1.0.tif",
+      "url": "https://arcticdata.io/data/10.18739/A2610VT7V/earthdem/earthdem_03_conus/utm18n_45_05_2_1/output/utm18n_45_05_2_1_prob_v1.0.tif",
       "originEasting": 538000,
       "originNorthing": 4512000,
       "pixelSize": 2,
       "width": 37001,
       "height": 37001,
-      "fillPixels": 1291357
+      "fillPixels": 5165361
     },
     {
       "file": "utm18n_45_05_2_2_prob_v1.0.tif",
+      "url": "https://arcticdata.io/data/10.18739/A2610VT7V/earthdem/earthdem_03_conus/utm18n_45_05_2_2/output/utm18n_45_05_2_2_prob_v1.0.tif",
       "originEasting": 588000,
       "originNorthing": 4512000,
       "pixelSize": 2,
       "width": 37001,
       "height": 37001,
-      "fillPixels": 215269
+      "fillPixels": 861241
     }
   ]
 }

@@ -31,7 +31,7 @@ import { WaterOccurrenceTilesPlugin } from '../plugins/WaterOccurrenceTilesPlugi
 import { Story } from './3DTilesRenderer-Story'
 
 const MAXAR_WATER_PROBABILITY_PATH =
-  '/public/maxar/manhattan-water-probability.png?v=maxar-mosaic-4'
+  '/public/maxar/manhattan-water-probability.png?v=maxar-mosaic-8192'
 const MAXAR_WATER_PROBABILITY_RECTANGLE = new Rectangle(
   radians(-74.55423086017844),
   radians(40.07668324876217),
@@ -40,10 +40,18 @@ const MAXAR_WATER_PROBABILITY_RECTANGLE = new Rectangle(
 )
 const MAXAR_LAND_THRESHOLD = 0
 const MAXAR_WATER_THRESHOLD = 90
-const MAXAR_OVERLAY_SEGMENTS = 96
+const MAXAR_OVERLAY_SEGMENTS = 192
 const MAXAR_FAR_MASK_ALTITUDE = 120
 const MAXAR_FAR_MASK_ALPHA = 245
-const MAXAR_MASK_TEXTURE_SIZES = [512, 768, 1024, 1536, 2048, 4096] as const
+const MAXAR_MASK_TEXTURE_SIZES = [
+  512,
+  768,
+  1024,
+  1536,
+  2048,
+  4096,
+  8192
+] as const
 const MAXAR_CANVAS_CACHE_LIMIT = 2
 const MAXAR_FAR_MASK_COLORS: Readonly<Record<MaxarMaskTextureSize, number>> = {
   512: 0x4e8cff,
@@ -51,7 +59,8 @@ const MAXAR_FAR_MASK_COLORS: Readonly<Record<MaxarMaskTextureSize, number>> = {
   1024: 0xffba49,
   1536: 0xc8d84a,
   2048: 0x3fd284,
-  4096: 0xffffff
+  4096: 0xffffff,
+  8192: 0xfff4b8
 }
 const MAXAR_MASK_CAMERA_DISTANCE_TIERS: readonly MaxarMaskCameraDistanceTier[] = [
   { maximumCameraDistance: 9000, textureSize: 4096 },
